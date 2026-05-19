@@ -16,6 +16,10 @@ pub fn is_enabled() -> bool {
 
 pub fn set_enabled(enable: bool) -> Result<(), String> {
     let svc = service();
-    let result = if enable { svc.register() } else { svc.unregister() };
+    let result = if enable {
+        svc.register()
+    } else {
+        svc.unregister()
+    };
     result.map_err(|e| format!("{e:?}"))
 }

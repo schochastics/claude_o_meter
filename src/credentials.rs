@@ -130,7 +130,10 @@ mod tests {
 
     #[test]
     fn malformed_returns_error() {
-        assert!(matches!(parse_blob(b"not json"), Err(CredError::Malformed(_))));
+        assert!(matches!(
+            parse_blob(b"not json"),
+            Err(CredError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -151,7 +154,10 @@ mod tests {
         let outside_margin = Utc.with_ymd_and_hms(2026, 5, 19, 11, 58, 0).unwrap();
         // After expiry.
         let after = Utc.with_ymd_and_hms(2026, 5, 19, 12, 5, 0).unwrap();
-        assert!(creds.is_expired(inside_margin), "inside 60s margin -> expired");
+        assert!(
+            creds.is_expired(inside_margin),
+            "inside 60s margin -> expired"
+        );
         assert!(!creds.is_expired(outside_margin), "outside margin -> valid");
         assert!(creds.is_expired(after));
     }

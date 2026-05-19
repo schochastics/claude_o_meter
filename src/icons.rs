@@ -45,8 +45,7 @@ pub fn icon_for(band: Band) -> Icon {
 }
 
 pub fn icon_for_split(left: Band, right: Band) -> Icon {
-    Icon::from_rgba(tinted_split(left, right), ICON_SIZE, ICON_SIZE)
-        .expect("valid RGBA buffer")
+    Icon::from_rgba(tinted_split(left, right), ICON_SIZE, ICON_SIZE).expect("valid RGBA buffer")
 }
 
 pub fn auth_required_icon() -> Icon {

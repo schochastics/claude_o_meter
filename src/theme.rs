@@ -31,7 +31,9 @@ impl Appearance {
 #[cfg(target_os = "macos")]
 fn detect_via_nsapp() -> Option<Appearance> {
     use objc2::rc::autoreleasepool;
-    use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication};
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    };
     use objc2_foundation::NSArray;
 
     autoreleasepool(|_| unsafe {

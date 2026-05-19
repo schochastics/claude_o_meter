@@ -22,7 +22,10 @@ struct WindowState {
 
 impl WindowState {
     fn new(n: usize) -> Self {
-        Self { fired: vec![false; n], reset_at: None }
+        Self {
+            fired: vec![false; n],
+            reset_at: None,
+        }
     }
 }
 
@@ -94,10 +97,7 @@ fn crossings(
             state.fired[i] = true;
             out.push(Notification {
                 title: format!("Claude {label} quota at {}%", (t * 100.0).round() as u32),
-                body: format!(
-                    "Current usage: {:.0}%",
-                    (utilization * 100.0).round()
-                ),
+                body: format!("Current usage: {:.0}%", (utilization * 100.0).round()),
             });
         }
     }
@@ -120,8 +120,14 @@ mod tests {
 
     fn resp(session: Option<f64>, weekly: Option<f64>, reset: DateTime<Utc>) -> UsageResponse {
         UsageResponse {
-            five_hour: session.map(|u| Window { utilization: u, resets_at: reset }),
-            seven_day: weekly.map(|u| Window { utilization: u, resets_at: reset }),
+            five_hour: session.map(|u| Window {
+                utilization: u,
+                resets_at: reset,
+            }),
+            seven_day: weekly.map(|u| Window {
+                utilization: u,
+                resets_at: reset,
+            }),
             extra: BTreeMap::new(),
         }
     }
@@ -157,7 +163,11 @@ mod tests {
 
         let _ = t.observe(&resp(Some(0.99), None, r1));
         let n = t.observe(&resp(Some(0.99), None, r2));
-        assert_eq!(n.len(), 3, "all three thresholds should re-arm at new window");
+        assert_eq!(
+            n.len(),
+            3,
+            "all three thresholds should re-arm at new window"
+        );
     }
 
     #[test]

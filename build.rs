@@ -24,7 +24,7 @@ fn main() {
     // utilization band at runtime.
     let mask: Vec<u8> = pix.data().chunks_exact(4).map(|px| px[3]).collect();
 
-    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"))
-        .join("icon_mask.bin");
+    let out =
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo")).join("icon_mask.bin");
     fs::write(&out, &mask).expect("write mask blob");
 }

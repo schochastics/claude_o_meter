@@ -4,7 +4,7 @@ use crate::api::{ApiClient, FetchError, UsageResponse};
 use crate::credentials::{self, CredError};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 #[derive(Debug, Clone)]

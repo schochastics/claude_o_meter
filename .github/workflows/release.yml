@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --locked
+
+      - name: Build arm64
+        run: cargo build --release --target=aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --target=x86_64-apple-darwin
+
+      - name: Bundle .app (using arm64 target)
+        run: cargo bundle --release --target=aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          APP="target/aarch64-apple-darwin/release/bundle/osx/Claude-O-Meter.app"
+          lipo -create \
+            "target/aarch64-apple-darwin/release/claude_o_meter" \
+            "target/x86_64-apple-darwin/release/claude_o_meter" \
+            -output "$APP/Contents/MacOS/claude_o_meter"
+          file "$APP/Contents/MacOS/claude_o_meter"
+
+      - name: Ad-hoc sign
+        run: |
+          APP="target/aarch64-apple-darwin/release/bundle/osx/Claude-O-Meter.app"
+          codesign --force --deep --sign - "$APP"
+          codesign -dv "$APP"
+
+      - name: Zip
+        run: |
+          cd target/aarch64-apple-darwin/release/bundle/osx
+          ditto -c -k --sequesterRsrc --keepParent Claude-O-Meter.app Claude-O-Meter.zip
+          shasum -a 256 Claude-O-Meter.zip > Claude-O-Meter.zip.sha256
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          name: ${{ steps.tag.outputs.value }}
+          generate_release_notes: true
+          files: |
+            target/aarch64-apple-darwin/release/bundle/osx/Claude-O-Meter.zip
+            target/aarch64-apple-darwin/release/bundle/osx/Claude-O-Meter.zip.sha256
+          body: |
+            Universal binary (arm64 + x86_64), ad-hoc signed.
+
+            ## Install
+
+            1. Download `Claude-O-Meter.zip` below and unzip.
+            2. Move `Claude-O-Meter.app` to `/Applications`.
+            3. First launch: **right-click → Open** (macOS Gatekeeper will warn about an unverified developer — click *Open*). Or run once:
+               ```sh
+               xattr -d com.apple.quarantine /Applications/Claude-O-Meter.app
+               ```
+            4. Approve the Keychain prompt (*Always Allow*) so the app can read your Claude Code OAuth token.
+
+            See the [README](https://github.com/${{ github.repository }}#first-run) for full setup notes.

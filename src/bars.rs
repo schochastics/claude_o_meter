@@ -20,11 +20,7 @@ pub struct Theme {
 /// `segments` are `(count, rgb)` pairs laid out left-to-right. The filled
 /// width is `(sum(counts) / scale_basis) × CANVAS_W`, clamped to the
 /// canvas. The remainder of the row is `theme.empty_bg`.
-pub fn render_bar_rgba(
-    segments: &[(u64, [u8; 3])],
-    scale_basis: u64,
-    theme: &Theme,
-) -> Vec<u8> {
+pub fn render_bar_rgba(segments: &[(u64, [u8; 3])], scale_basis: u64, theme: &Theme) -> Vec<u8> {
     let mut buf = fill(theme.empty_bg);
     let total: u64 = segments.iter().map(|(n, _)| *n).sum();
     if total == 0 || scale_basis == 0 {
@@ -36,8 +32,7 @@ pub fn render_bar_rgba(
         if *n == 0 {
             continue;
         }
-        let segment_px =
-            ((*n as f64 / basis as f64) * CANVAS_W as f64).round() as u32;
+        let segment_px = ((*n as f64 / basis as f64) * CANVAS_W as f64).round() as u32;
         let end = (x + segment_px).min(CANVAS_W);
         paint_band(&mut buf, x, end, *rgb);
         x = end;
@@ -85,7 +80,9 @@ mod tests {
     use super::*;
 
     fn light_theme() -> Theme {
-        Theme { empty_bg: [0xE5, 0xE5, 0xE7, 0xFF] }
+        Theme {
+            empty_bg: [0xE5, 0xE5, 0xE7, 0xFF],
+        }
     }
 
     fn pixel(buf: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -113,7 +110,10 @@ mod tests {
     fn zero_total_is_empty_bg_only() {
         let buf = render_bar_rgba(&[(0, [255, 0, 0])], 100, &light_theme());
         assert_eq!(pixel(&buf, 0, 0), light_theme().empty_bg);
-        assert_eq!(pixel(&buf, CANVAS_W - 1, CANVAS_H - 1), light_theme().empty_bg);
+        assert_eq!(
+            pixel(&buf, CANVAS_W - 1, CANVAS_H - 1),
+            light_theme().empty_bg
+        );
     }
 
     #[test]

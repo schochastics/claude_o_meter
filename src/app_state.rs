@@ -7,7 +7,10 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Clone)]
 pub enum DataState {
     Loading,
-    Ok { usage: UsageResponse, fetched_at: DateTime<Utc> },
+    Ok {
+        usage: UsageResponse,
+        fetched_at: DateTime<Utc>,
+    },
     AuthRequired,
     Error(String),
 }
@@ -21,6 +24,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(launch_at_login: bool) -> Self {
-        Self { data: DataState::Loading, launch_at_login, history: None }
+        Self {
+            data: DataState::Loading,
+            launch_at_login,
+            history: None,
+        }
     }
 }

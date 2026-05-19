@@ -1,8 +1,8 @@
 //! Build the tray dropdown menu from the current AppState.
 
 use crate::app_state::{AppState, DataState};
-use crate::bars::{render_bar_rgba, render_solid_bar_rgba, Theme, CANVAS_H, CANVAS_W};
-use crate::history::{short_name, Aggregates};
+use crate::bars::{CANVAS_H, CANVAS_W, Theme, render_bar_rgba, render_solid_bar_rgba};
+use crate::history::{Aggregates, short_name};
 use crate::icons::Band;
 use crate::theme::Appearance;
 use crate::time_fmt::resets_in;
@@ -50,10 +50,22 @@ pub fn build_menu(state: &AppState) -> MenuIds {
             let now = Utc::now();
 
             if let Some(w) = usage.five_hour.as_ref() {
-                let _ = menu.append(&window_row("Session", w.utilization, w.resets_at, now, &theme));
+                let _ = menu.append(&window_row(
+                    "Session",
+                    w.utilization,
+                    w.resets_at,
+                    now,
+                    &theme,
+                ));
             }
             if let Some(w) = usage.seven_day.as_ref() {
-                let _ = menu.append(&window_row("Weekly", w.utilization, w.resets_at, now, &theme));
+                let _ = menu.append(&window_row(
+                    "Weekly",
+                    w.utilization,
+                    w.resets_at,
+                    now,
+                    &theme,
+                ));
             }
 
             let per_model = usage.per_model();
@@ -109,15 +121,19 @@ pub fn build_menu(state: &AppState) -> MenuIds {
 
     let _ = menu.append(&PredefinedMenuItem::separator());
     let refresh = MenuItem::new("Refresh now", true, None);
-    let launch_at_login =
-        CheckMenuItem::new("Launch at Login", true, state.launch_at_login, None);
+    let launch_at_login = CheckMenuItem::new("Launch at Login", true, state.launch_at_login, None);
     let quit = MenuItem::new("Quit Claude-O-Meter", true, None);
     let _ = menu.append(&refresh);
     let _ = menu.append(&launch_at_login);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
-    MenuIds { menu, refresh, launch_at_login, quit }
+    MenuIds {
+        menu,
+        refresh,
+        launch_at_login,
+        quit,
+    }
 }
 
 fn window_row(
@@ -151,7 +167,10 @@ fn history_submenu(h: &Aggregates, today: chrono::NaiveDate, theme: &Theme) -> S
     let week_total: u64 = days.iter().map(|(_, t)| t.sum()).sum();
 
     let sub = Submenu::new(
-        format!("History — last 7d: {} \u{25B8}", humanize_tokens(week_total)),
+        format!(
+            "History — last 7d: {} \u{25B8}",
+            humanize_tokens(week_total)
+        ),
         true,
     );
 
@@ -256,8 +275,16 @@ pub fn title_for(state: &AppState) -> String {
 pub fn bands_for(state: &AppState) -> (Band, Band) {
     match &state.data {
         DataState::Ok { usage, .. } => {
-            let s = usage.five_hour.as_ref().map(|w| w.utilization).unwrap_or(0.0);
-            let w = usage.seven_day.as_ref().map(|w| w.utilization).unwrap_or(0.0);
+            let s = usage
+                .five_hour
+                .as_ref()
+                .map(|w| w.utilization)
+                .unwrap_or(0.0);
+            let w = usage
+                .seven_day
+                .as_ref()
+                .map(|w| w.utilization)
+                .unwrap_or(0.0);
             (Band::from_fraction(s), Band::from_fraction(w))
         }
         DataState::AuthRequired | DataState::Error(_) => (Band::Red, Band::Red),
@@ -289,12 +316,21 @@ mod tests {
     fn title_ok_takes_max() {
         let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
         let usage = UsageResponse {
-            five_hour: Some(Window { utilization: 0.30, resets_at: r }),
-            seven_day: Some(Window { utilization: 0.74, resets_at: r }),
+            five_hour: Some(Window {
+                utilization: 0.30,
+                resets_at: r,
+            }),
+            seven_day: Some(Window {
+                utilization: 0.74,
+                resets_at: r,
+            }),
             extra: BTreeMap::new(),
         };
         let mut s = AppState::new(false);
-        s.data = DataState::Ok { usage, fetched_at: Utc::now() };
+        s.data = DataState::Ok {
+            usage,
+            fetched_at: Utc::now(),
+        };
         assert_eq!(title_for(&s), " 74%");
     }
 
@@ -302,12 +338,21 @@ mod tests {
     fn bands_ok_match_fractions() {
         let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
         let usage = UsageResponse {
-            five_hour: Some(Window { utilization: 0.95, resets_at: r }),
-            seven_day: Some(Window { utilization: 0.20, resets_at: r }),
+            five_hour: Some(Window {
+                utilization: 0.95,
+                resets_at: r,
+            }),
+            seven_day: Some(Window {
+                utilization: 0.20,
+                resets_at: r,
+            }),
             extra: BTreeMap::new(),
         };
         let mut s = AppState::new(false);
-        s.data = DataState::Ok { usage, fetched_at: Utc::now() };
+        s.data = DataState::Ok {
+            usage,
+            fetched_at: Utc::now(),
+        };
         assert_eq!(bands_for(&s), (Band::Red, Band::Blue));
     }
 
@@ -349,12 +394,18 @@ mod tests {
     fn bands_missing_window_falls_back_to_zero() {
         let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
         let usage = UsageResponse {
-            five_hour: Some(Window { utilization: 0.80, resets_at: r }),
+            five_hour: Some(Window {
+                utilization: 0.80,
+                resets_at: r,
+            }),
             seven_day: None,
             extra: BTreeMap::new(),
         };
         let mut s = AppState::new(false);
-        s.data = DataState::Ok { usage, fetched_at: Utc::now() };
+        s.data = DataState::Ok {
+            usage,
+            fetched_at: Utc::now(),
+        };
         assert_eq!(bands_for(&s), (Band::Orange, Band::Blue));
     }
 }

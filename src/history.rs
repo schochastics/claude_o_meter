@@ -276,7 +276,9 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
         if parsed.kind.as_deref() != Some("assistant") {
             continue;
         }
-        let Some(message) = parsed.message else { continue };
+        let Some(message) = parsed.message else {
+            continue;
+        };
         let Some(usage) = message.usage else { continue };
         let totals = Totals {
             input: usage.input_tokens.unwrap_or(0),
@@ -301,7 +303,11 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
         }
     }
 
-    Ok(FileEntry { mtime_unix_ns: mtime, by_day, by_project })
+    Ok(FileEntry {
+        mtime_unix_ns: mtime,
+        by_day,
+        by_project,
+    })
 }
 
 /// Just the basename of a project path, plus the parent dir if there's a
@@ -412,12 +418,16 @@ mod tests {
         let f1 = write_jsonl(
             td.path(),
             "a.jsonl",
-            &[r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/x","message":{"usage":{"input_tokens":10}}}"#],
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/x","message":{"usage":{"input_tokens":10}}}"#,
+            ],
         );
         write_jsonl(
             td.path(),
             "b.jsonl",
-            &[r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/y","message":{"usage":{"input_tokens":20}}}"#],
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/y","message":{"usage":{"input_tokens":20}}}"#,
+            ],
         );
         let mut agg = Aggregates::default();
         agg.refresh(td.path()).unwrap();
@@ -436,17 +446,23 @@ mod tests {
         write_jsonl(
             td.path(),
             "a.jsonl",
-            &[r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/small","message":{"usage":{"input_tokens":10}}}"#],
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/small","message":{"usage":{"input_tokens":10}}}"#,
+            ],
         );
         write_jsonl(
             td.path(),
             "b.jsonl",
-            &[r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/big","message":{"usage":{"input_tokens":1000}}}"#],
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/big","message":{"usage":{"input_tokens":1000}}}"#,
+            ],
         );
         write_jsonl(
             td.path(),
             "c.jsonl",
-            &[r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/medium","message":{"usage":{"input_tokens":100}}}"#],
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/medium","message":{"usage":{"input_tokens":100}}}"#,
+            ],
         );
         let mut agg = Aggregates::default();
         agg.refresh(td.path()).unwrap();
@@ -462,7 +478,9 @@ mod tests {
         write_jsonl(
             td.path(),
             "s.jsonl",
-            &[r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"usage":{"input_tokens":1}}}"#],
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"usage":{"input_tokens":1}}}"#,
+            ],
         );
         let mut agg = Aggregates::default();
         agg.refresh(td.path()).unwrap();

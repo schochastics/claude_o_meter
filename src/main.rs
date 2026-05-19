@@ -4,7 +4,7 @@ use claude_o_meter::history::Aggregates;
 use claude_o_meter::icons::icon_for_split;
 use claude_o_meter::launch_at_login;
 use claude_o_meter::menu::{bands_for, build_menu, title_for};
-use claude_o_meter::notifications::{dispatch, ThresholdTracker};
+use claude_o_meter::notifications::{ThresholdTracker, dispatch};
 use claude_o_meter::poller::{self, PollEvent};
 use claude_o_meter::settings::Settings;
 use directories::{BaseDirs, ProjectDirs};
@@ -110,7 +110,10 @@ fn main() -> anyhow::Result<()> {
                         for n in tracker.observe(&usage) {
                             dispatch(&n);
                         }
-                        state.data = DataState::Ok { usage, fetched_at: Utc::now() };
+                        state.data = DataState::Ok {
+                            usage,
+                            fetched_at: Utc::now(),
+                        };
                     }
                     PollEvent::AuthRequired => {
                         state.data = DataState::AuthRequired;
@@ -211,19 +214,21 @@ fn spawn_history_loop(
                 let changed = working.refresh(&proj).unwrap_or(false);
                 if changed
                     && let Some(p) = cache.as_ref()
-                        && let Err(e) = working.save(p) {
-                            tracing::warn!(error = %e, "history save failed");
-                        }
+                    && let Err(e) = working.save(p)
+                {
+                    tracing::warn!(error = %e, "history save failed");
+                }
                 (changed, working)
             })
             .await;
             if let Ok((changed, updated)) = scanned
-                && changed {
-                    agg = updated.clone();
-                    if tx.send(updated).is_err() {
-                        break;
-                    }
+                && changed
+            {
+                agg = updated.clone();
+                if tx.send(updated).is_err() {
+                    break;
                 }
+            }
             tokio::time::sleep(Duration::from_secs(5 * 60)).await;
         }
     });

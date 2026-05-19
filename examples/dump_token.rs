@@ -13,7 +13,11 @@ fn main() {
     };
     let now = chrono::Utc::now();
     let token_preview = if creds.access_token.len() > 12 {
-        format!("{}…{}", &creds.access_token[..6], &creds.access_token[creds.access_token.len() - 4..])
+        format!(
+            "{}…{}",
+            &creds.access_token[..6],
+            &creds.access_token[creds.access_token.len() - 4..]
+        )
     } else {
         "<redacted>".to_string()
     };
@@ -22,6 +26,10 @@ fn main() {
     println!("now          : {now}");
     println!(
         "status       : {}",
-        if creds.is_expired(now) { "EXPIRED" } else { "valid" }
+        if creds.is_expired(now) {
+            "EXPIRED"
+        } else {
+            "valid"
+        }
     );
 }

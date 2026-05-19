@@ -53,8 +53,12 @@ impl UsageResponse {
             w.utilization /= 100.0;
         }
         for v in self.extra.values_mut() {
-            let Some(obj) = v.as_object_mut() else { continue };
-            let Some(num) = obj.get("utilization").and_then(|x| x.as_f64()) else { continue };
+            let Some(obj) = v.as_object_mut() else {
+                continue;
+            };
+            let Some(num) = obj.get("utilization").and_then(|x| x.as_f64()) else {
+                continue;
+            };
             if let Some(scaled) = serde_json::Number::from_f64(num / 100.0) {
                 obj.insert("utilization".into(), serde_json::Value::Number(scaled));
             }
@@ -92,8 +96,16 @@ impl UsageResponse {
 
     /// Higher of session and weekly utilization, for the menu bar number.
     pub fn headline_fraction(&self) -> f64 {
-        let s = self.five_hour.as_ref().map(|w| w.utilization).unwrap_or(0.0);
-        let w = self.seven_day.as_ref().map(|w| w.utilization).unwrap_or(0.0);
+        let s = self
+            .five_hour
+            .as_ref()
+            .map(|w| w.utilization)
+            .unwrap_or(0.0);
+        let w = self
+            .seven_day
+            .as_ref()
+            .map(|w| w.utilization)
+            .unwrap_or(0.0);
         s.max(w)
     }
 }
@@ -144,7 +156,11 @@ impl ApiClient {
             .user_agent(concat!("claude_o_meter/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("build reqwest client");
-        Self { http, token, base_url }
+        Self {
+            http,
+            token,
+            base_url,
+        }
     }
 
     pub async fn fetch(&self) -> Result<UsageResponse, FetchError> {
@@ -261,7 +277,10 @@ mod tests {
     fn synth(util: f64) -> UsageResponse {
         let resets_at: chrono::DateTime<chrono::Utc> = "2026-05-19T17:00:00Z".parse().unwrap();
         UsageResponse {
-            five_hour: Some(Window { utilization: util, resets_at }),
+            five_hour: Some(Window {
+                utilization: util,
+                resets_at,
+            }),
             seven_day: None,
             extra: BTreeMap::new(),
         }
