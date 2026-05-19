@@ -13,6 +13,8 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+#[cfg(target_os = "macos")]
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tokio::sync::mpsc as tokio_mpsc;
 use tray_icon::menu::{MenuEvent, MenuId};
 use tray_icon::{TrayIcon, TrayIconBuilder};
@@ -40,7 +42,9 @@ fn main() -> anyhow::Result<()> {
     let mut tracker = ThresholdTracker::new(settings.thresholds.clone());
     let mut state = AppState::new(launch_at_login::is_enabled());
 
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    #[cfg(target_os = "macos")]
+    event_loop.set_activation_policy(ActivationPolicy::Accessory);
     let proxy = event_loop.create_proxy();
 
     let (tokio_tx, mut tokio_rx) = tokio_mpsc::unbounded_channel::<PollEvent>();
