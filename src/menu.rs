@@ -1,12 +1,15 @@
 //! Build the tray dropdown menu from the current AppState.
 
 use crate::app_state::{AppState, DataState};
-use crate::bars::{render_bar, render_stacked_bar_with};
+use crate::bars::{render_bar_rgba, render_solid_bar_rgba, Theme, CANVAS_H, CANVAS_W};
 use crate::history::{short_name, Aggregates};
 use crate::icons::Band;
+use crate::theme::Appearance;
 use crate::time_fmt::resets_in;
 use chrono::{Local, Utc};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{
+    CheckMenuItem, Icon, IconMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
+};
 
 pub struct MenuIds {
     pub menu: Menu,
@@ -15,59 +18,59 @@ pub struct MenuIds {
     pub quit: MenuItem,
 }
 
-const BAR_WIDTH: usize = 16;
+// Token-category colors for the stacked history bar.
+const COLOR_INPUT: [u8; 3] = [0x4D, 0x9D, 0xE0]; // blue
+const COLOR_OUTPUT: [u8; 3] = [0xF2, 0x9E, 0x4C]; // claude-orange
+const COLOR_CACHE_CREATION: [u8; 3] = [0xB5, 0x7E, 0xDC]; // purple
+const COLOR_CACHE_READ: [u8; 3] = [0x3A, 0xC0, 0x6E]; // green
+
+const TOP_PROJECTS_N: usize = 8;
+const TOKEN_COL_WIDTH: usize = 6;
+const FIG_SPACE: char = '\u{2007}';
 
 pub fn build_menu(state: &AppState) -> MenuIds {
     let menu = Menu::new();
+    let theme = Appearance::detect().theme();
 
     match &state.data {
         DataState::Loading => {
-            let item = MenuItem::new("Loading…", false, None);
-            let _ = menu.append(&item);
+            let _ = menu.append(&MenuItem::new("Loading…", false, None));
         }
         DataState::AuthRequired => {
-            let title = MenuItem::new("Token expired — run `claude login`", false, None);
-            let _ = menu.append(&title);
+            let _ = menu.append(&MenuItem::new(
+                "Token expired — run `claude login`",
+                false,
+                None,
+            ));
         }
         DataState::Error(msg) => {
-            let item = MenuItem::new(format!("Error: {msg}"), false, None);
-            let _ = menu.append(&item);
+            let _ = menu.append(&MenuItem::new(format!("Error: {msg}"), false, None));
         }
         DataState::Ok { usage, fetched_at } => {
             let now = Utc::now();
+
             if let Some(w) = usage.five_hour.as_ref() {
-                let pct = (w.utilization * 100.0).round() as i64;
-                let title = MenuItem::new(format!("Session  {pct}%"), false, None);
-                let bar = MenuItem::new(
-                    format!("  {} {}", render_bar(w.utilization, BAR_WIDTH), resets_in(w.resets_at, now)),
-                    false,
-                    None,
-                );
-                let _ = menu.append(&title);
-                let _ = menu.append(&bar);
+                let _ = menu.append(&window_row("Session", w.utilization, w.resets_at, now, &theme));
             }
             if let Some(w) = usage.seven_day.as_ref() {
-                let pct = (w.utilization * 100.0).round() as i64;
-                let title = MenuItem::new(format!("Weekly  {pct}%"), false, None);
-                let bar = MenuItem::new(
-                    format!("  {} {}", render_bar(w.utilization, BAR_WIDTH), resets_in(w.resets_at, now)),
-                    false,
-                    None,
-                );
-                let _ = menu.append(&title);
-                let _ = menu.append(&bar);
+                let _ = menu.append(&window_row("Weekly", w.utilization, w.resets_at, now, &theme));
             }
 
             let per_model = usage.per_model();
             if !per_model.is_empty() {
                 let _ = menu.append(&PredefinedMenuItem::separator());
-                let header = MenuItem::new("Weekly by model", false, None);
-                let _ = menu.append(&header);
+                let _ = menu.append(&MenuItem::new("Weekly by model", false, None));
                 for (label, w) in per_model {
                     let pct = (w.utilization * 100.0).round() as i64;
-                    let row = MenuItem::new(
-                        format!("  {:<8} {}  {pct}%", label, render_bar(w.utilization, BAR_WIDTH - 4)),
+                    let bar = render_solid_bar_rgba(
+                        w.utilization,
+                        Band::from_fraction(w.utilization).rgb(),
+                        &theme,
+                    );
+                    let row = IconMenuItem::new(
+                        format!("{label}  {pct}%"),
                         false,
+                        Some(bar_icon(bar)),
                         None,
                     );
                     let _ = menu.append(&row);
@@ -75,31 +78,32 @@ pub fn build_menu(state: &AppState) -> MenuIds {
             }
 
             let _ = menu.append(&PredefinedMenuItem::separator());
-            let fetched = MenuItem::new(
+            let _ = menu.append(&MenuItem::new(
                 format!(
                     "Updated {}",
                     fetched_at.with_timezone(&Local).format("%H:%M:%S")
                 ),
                 false,
                 None,
-            );
-            let _ = menu.append(&fetched);
+            ));
         }
     }
 
     if let Some(history) = state.history.as_ref() {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let today = Local::now().date_naive();
-        let _ = menu.append(&history_submenu(history, today));
+        let _ = menu.append(&history_submenu(history, today, &theme));
         let _ = menu.append(&top_projects_submenu(
             "Top projects (7d) \u{25B8}",
             history,
             Some(today - chrono::Duration::days(6)),
+            &theme,
         ));
         let _ = menu.append(&top_projects_submenu(
             "Top projects (all-time) \u{25B8}",
             history,
             None,
+            &theme,
         ));
     }
 
@@ -116,22 +120,31 @@ pub fn build_menu(state: &AppState) -> MenuIds {
     MenuIds { menu, refresh, launch_at_login, quit }
 }
 
-const DAY_BAR_WIDTH: usize = 20;
-const PROJECT_BAR_WIDTH: usize = 16;
-const TOP_PROJECTS_N: usize = 8;
-const TOKEN_COL_WIDTH: usize = 6;
-const FIG_SPACE: char = '\u{2007}';
-/// White emoji square — same visual width as the colored bar segments, so
-/// padding the bar to a fixed cell count gives a consistent pixel width.
-const BAR_EMPTY: char = '\u{2B1C}';
+fn window_row(
+    name: &str,
+    utilization: f64,
+    resets_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+    theme: &Theme,
+) -> IconMenuItem {
+    let pct = (utilization * 100.0).round() as i64;
+    let band = Band::from_fraction(utilization);
+    let bar = render_solid_bar_rgba(utilization, band.rgb(), theme);
+    IconMenuItem::new(
+        format!("{name}  {pct}%  {}", resets_in(resets_at, now)),
+        false,
+        Some(bar_icon(bar)),
+        None,
+    )
+}
 
-/// Build the "History ▸" submenu — 7 day rows, today first.
-///
-/// Layout per row: `tokens  bar  date`. Anything that needs to align goes on
-/// the left (tokens are padded with figure-space so the column edge is
-/// stable; the bar starts at a fixed offset). The date label is rightmost
-/// so its proportional-letter widths don't push the bar around.
-fn history_submenu(h: &Aggregates, today: chrono::NaiveDate) -> Submenu {
+fn bar_icon(rgba: Vec<u8>) -> Icon {
+    Icon::from_rgba(rgba, CANVAS_W, CANVAS_H).expect("valid RGBA buffer")
+}
+
+/// Build the "History ▸" submenu — 7 day rows, today first, with stacked
+/// per-category bars rendered as menu-item images.
+fn history_submenu(h: &Aggregates, today: chrono::NaiveDate, theme: &Theme) -> Submenu {
     let mut days = h.last_n_days(7, today);
     days.reverse();
     let max_total: u64 = days.iter().map(|(_, t)| t.sum()).max().unwrap_or(0);
@@ -142,44 +155,42 @@ fn history_submenu(h: &Aggregates, today: chrono::NaiveDate) -> Submenu {
         true,
     );
 
-    let legend = MenuItem::new(
-        "\u{1F7E6} in   \u{1F7E7} out   \u{1F7EA} cwrite   \u{1F7E9} cread",
+    let _ = sub.append(&MenuItem::new(
+        "input · output · cache write · cache read",
         false,
         None,
-    );
-    let _ = sub.append(&legend);
+    ));
     let _ = sub.append(&PredefinedMenuItem::separator());
 
+    let scale_basis = max_total.max(1);
     for (date, totals) in &days {
         let row_total = totals.sum();
-        // Build the chart bar by treating any unused budget as a fifth
-        // "empty" segment — this keeps the total bar width at DAY_BAR_WIDTH
-        // cells, all emoji-squared, so the trailing date column lines up
-        // at a consistent pixel offset.
-        let scale_basis = max_total.max(1);
-        let bar = render_stacked_bar_with(
+        let bar = render_bar_rgba(
             &[
-                (totals.input, '\u{1F7E6}'),
-                (totals.output, '\u{1F7E7}'),
-                (totals.cache_creation, '\u{1F7EA}'),
-                (totals.cache_read, '\u{1F7E9}'),
-                (scale_basis.saturating_sub(row_total), BAR_EMPTY),
+                (totals.input, COLOR_INPUT),
+                (totals.output, COLOR_OUTPUT),
+                (totals.cache_creation, COLOR_CACHE_CREATION),
+                (totals.cache_read, COLOR_CACHE_READ),
             ],
-            DAY_BAR_WIDTH,
-            BAR_EMPTY,
+            scale_basis,
+            theme,
         );
         let label = format!(
-            "{}  {}  {}",
+            "{}  {}",
             pad_left_figure(&humanize_tokens(row_total), TOKEN_COL_WIDTH),
-            bar,
             date.format("%a %m-%d"),
         );
-        let _ = sub.append(&MenuItem::new(label, false, None));
+        let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
     }
     sub
 }
 
-fn top_projects_submenu(label: &str, h: &Aggregates, since: Option<chrono::NaiveDate>) -> Submenu {
+fn top_projects_submenu(
+    label: &str,
+    h: &Aggregates,
+    since: Option<chrono::NaiveDate>,
+    theme: &Theme,
+) -> Submenu {
     let sub = Submenu::new(label, true);
     let top = h.top_projects(TOP_PROJECTS_N, since);
     if top.is_empty() {
@@ -189,22 +200,15 @@ fn top_projects_submenu(label: &str, h: &Aggregates, since: Option<chrono::Naive
     let max_total = top.first().map(|(_, n)| *n).unwrap_or(0).max(1);
     let all_paths: Vec<&str> = h.by_project.keys().map(|s| s.as_str()).collect();
     for (path, total) in &top {
-        let bar = render_stacked_bar_with(
-            &[
-                (*total, '\u{1F7E7}'),
-                (max_total.saturating_sub(*total), BAR_EMPTY),
-            ],
-            PROJECT_BAR_WIDTH,
-            BAR_EMPTY,
-        );
+        let fraction = *total as f64 / max_total as f64;
+        let bar = render_solid_bar_rgba(fraction, COLOR_OUTPUT, theme);
         let name = short_name(path, &all_paths);
         let label = format!(
-            "{}  {}  {}",
+            "{}  {}",
             pad_left_figure(&humanize_tokens(*total), TOKEN_COL_WIDTH),
-            bar,
             name,
         );
-        let _ = sub.append(&MenuItem::new(label, false, None));
+        let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
     }
     sub
 }
@@ -222,8 +226,8 @@ fn humanize_tokens(n: u64) -> String {
 }
 
 /// Left-pad `s` with figure-spaces (U+2007) to `width` chars. Figure spaces
-/// are designed to match the width of a digit in proportional fonts, so
-/// they keep numeric columns aligned in menu labels rendered in SF.
+/// match the width of a digit in proportional fonts, so they keep numeric
+/// columns aligned in menu labels rendered in SF.
 fn pad_left_figure(s: &str, width: usize) -> String {
     let chars = s.chars().count();
     if chars >= width {
@@ -232,7 +236,6 @@ fn pad_left_figure(s: &str, width: usize) -> String {
     let pad: String = std::iter::repeat_n(FIG_SPACE, width - chars).collect();
     format!("{pad}{s}")
 }
-
 
 /// Menu bar title shown beside the icon. Empty when there's no data yet.
 pub fn title_for(state: &AppState) -> String {

@@ -30,7 +30,7 @@ impl Band {
         }
     }
 
-    fn rgb(self) -> [u8; 3] {
+    pub fn rgb(self) -> [u8; 3] {
         match self {
             Band::Blue => [0x4D, 0x9D, 0xE0],
             Band::Green => [0x3A, 0xC0, 0x6E],

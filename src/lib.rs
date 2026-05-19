@@ -9,4 +9,5 @@ pub mod menu;
 pub mod notifications;
 pub mod poller;
 pub mod settings;
+pub mod theme;
 pub mod time_fmt;
