@@ -1,0 +1,22 @@
+{
+  "five_hour": {
+    "utilization": 0.47,
+    "resets_at": "2026-05-19T17:00:00Z"
+  },
+  "seven_day": {
+    "utilization": 0.62,
+    "resets_at": "2026-05-26T00:00:00Z"
+  },
+  "seven_day_sonnet": {
+    "utilization": 0.38,
+    "resets_at": "2026-05-26T00:00:00Z"
+  },
+  "seven_day_opus": {
+    "utilization": 0.80,
+    "resets_at": "2026-05-26T00:00:00Z"
+  },
+  "seven_day_haiku": {
+    "utilization": 0.11,
+    "resets_at": "2026-05-26T00:00:00Z"
+  }
+}

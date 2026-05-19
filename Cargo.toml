@@ -1,0 +1,39 @@
+[package]
+name = "claude_o_meter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6"
+mac-notification-sys = "0.6"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+security-framework = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smappservice-rs = "0.1"
+tao = "0.35"
+thiserror = "2.0.18"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = "0.24"
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+
+[package.metadata.bundle]
+name = "claude_o_meter"
+identifier = "com.cynkra.claude-o-meter"
+category = "public.app-category.developer-tools"
+short_description = "Menu-bar quota monitor for Claude Code"
+long_description = "A native macOS menu bar app that polls the Anthropic OAuth usage endpoint and shows session + weekly Claude Code quota at a glance."
+osx_minimum_system_version = "13.0"
+osx_info_plist_exts = ["build/Info.plist.partial"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
