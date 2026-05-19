@@ -1,7 +1,7 @@
 //! Build the tray dropdown menu from the current AppState.
 
 use crate::app_state::{AppState, DataState};
-use crate::bars::{render_bar, render_stacked_bar};
+use crate::bars::{render_bar, render_stacked_bar_with};
 use crate::history::{short_name, Aggregates};
 use crate::icons::Band;
 use crate::time_fmt::resets_in;
@@ -75,15 +75,32 @@ pub fn build_menu(state: &AppState) -> MenuIds {
             }
 
             let _ = menu.append(&PredefinedMenuItem::separator());
-            let fetched =
-                MenuItem::new(format!("Updated {}", fetched_at.format("%H:%M:%S")), false, None);
+            let fetched = MenuItem::new(
+                format!(
+                    "Updated {}",
+                    fetched_at.with_timezone(&Local).format("%H:%M:%S")
+                ),
+                false,
+                None,
+            );
             let _ = menu.append(&fetched);
         }
     }
 
     if let Some(history) = state.history.as_ref() {
         let _ = menu.append(&PredefinedMenuItem::separator());
-        append_history_section(&menu, history);
+        let today = Local::now().date_naive();
+        let _ = menu.append(&history_submenu(history, today));
+        let _ = menu.append(&top_projects_submenu(
+            "Top projects (7d) \u{25B8}",
+            history,
+            Some(today - chrono::Duration::days(6)),
+        ));
+        let _ = menu.append(&top_projects_submenu(
+            "Top projects (all-time) \u{25B8}",
+            history,
+            None,
+        ));
     }
 
     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -100,66 +117,66 @@ pub fn build_menu(state: &AppState) -> MenuIds {
 }
 
 const DAY_BAR_WIDTH: usize = 20;
-const PROJECT_BAR_WIDTH: usize = 14;
+const PROJECT_BAR_WIDTH: usize = 16;
 const TOP_PROJECTS_N: usize = 8;
+const TOKEN_COL_WIDTH: usize = 6;
+const FIG_SPACE: char = '\u{2007}';
+/// White emoji square — same visual width as the colored bar segments, so
+/// padding the bar to a fixed cell count gives a consistent pixel width.
+const BAR_EMPTY: char = '\u{2B1C}';
 
-/// Render the History block: 7-day stacked bars + Top-projects submenus.
-fn append_history_section(menu: &Menu, h: &Aggregates) {
-    let today = Local::now().date_naive();
-    let days = h.last_n_days(7, today);
+/// Build the "History ▸" submenu — 7 day rows, today first.
+///
+/// Layout per row: `tokens  bar  date`. Anything that needs to align goes on
+/// the left (tokens are padded with figure-space so the column edge is
+/// stable; the bar starts at a fixed offset). The date label is rightmost
+/// so its proportional-letter widths don't push the bar around.
+fn history_submenu(h: &Aggregates, today: chrono::NaiveDate) -> Submenu {
+    let mut days = h.last_n_days(7, today);
+    days.reverse();
     let max_total: u64 = days.iter().map(|(_, t)| t.sum()).max().unwrap_or(0);
     let week_total: u64 = days.iter().map(|(_, t)| t.sum()).sum();
 
-    let header = MenuItem::new(
-        format!("History — last 7d: {}", humanize_tokens(week_total)),
-        false,
-        None,
+    let sub = Submenu::new(
+        format!("History — last 7d: {} \u{25B8}", humanize_tokens(week_total)),
+        true,
     );
-    let _ = menu.append(&header);
 
     let legend = MenuItem::new(
-        "  \u{1F7E6} in   \u{1F7E7} out   \u{1F7EA} cwrite   \u{1F7E9} cread",
+        "\u{1F7E6} in   \u{1F7E7} out   \u{1F7EA} cwrite   \u{1F7E9} cread",
         false,
         None,
     );
-    let _ = menu.append(&legend);
+    let _ = sub.append(&legend);
+    let _ = sub.append(&PredefinedMenuItem::separator());
 
-    for (date, totals) in days {
+    for (date, totals) in &days {
         let row_total = totals.sum();
-        let cells = if max_total == 0 {
-            0
-        } else {
-            (DAY_BAR_WIDTH as f64 * row_total as f64 / max_total as f64).round() as usize
-        };
-        let bar = if cells == 0 {
-            String::new()
-        } else {
-            render_stacked_bar(
-                &[
-                    (totals.input, '\u{1F7E6}'),
-                    (totals.output, '\u{1F7E7}'),
-                    (totals.cache_creation, '\u{1F7EA}'),
-                    (totals.cache_read, '\u{1F7E9}'),
-                ],
-                cells,
-            )
-        };
-        let label = format!(
-            "  {}  {:>6}  {}",
-            date.format("%a %m-%d"),
-            humanize_tokens(row_total),
-            bar
+        // Build the chart bar by treating any unused budget as a fifth
+        // "empty" segment — this keeps the total bar width at DAY_BAR_WIDTH
+        // cells, all emoji-squared, so the trailing date column lines up
+        // at a consistent pixel offset.
+        let scale_basis = max_total.max(1);
+        let bar = render_stacked_bar_with(
+            &[
+                (totals.input, '\u{1F7E6}'),
+                (totals.output, '\u{1F7E7}'),
+                (totals.cache_creation, '\u{1F7EA}'),
+                (totals.cache_read, '\u{1F7E9}'),
+                (scale_basis.saturating_sub(row_total), BAR_EMPTY),
+            ],
+            DAY_BAR_WIDTH,
+            BAR_EMPTY,
         );
-        let _ = menu.append(&MenuItem::new(label, false, None));
+        let label = format!(
+            "{}  {}  {}",
+            pad_left_figure(&humanize_tokens(row_total), TOKEN_COL_WIDTH),
+            bar,
+            date.format("%a %m-%d"),
+        );
+        let _ = sub.append(&MenuItem::new(label, false, None));
     }
-
-    let since_7d = today - chrono::Duration::days(6);
-    let _ = menu.append(&top_projects_submenu("Top projects (7d) \u{25B8}", h, Some(since_7d)));
-    let _ = menu.append(&top_projects_submenu(
-        "Top projects (all-time) \u{25B8}",
-        h,
-        None,
-    ));
+    sub
 }
 
 fn top_projects_submenu(label: &str, h: &Aggregates, since: Option<chrono::NaiveDate>) -> Submenu {
@@ -169,16 +186,24 @@ fn top_projects_submenu(label: &str, h: &Aggregates, since: Option<chrono::Naive
         let _ = sub.append(&MenuItem::new("(no data)", false, None));
         return sub;
     }
-    let max_total = top.first().map(|(_, n)| *n).unwrap_or(0);
+    let max_total = top.first().map(|(_, n)| *n).unwrap_or(0).max(1);
     let all_paths: Vec<&str> = h.by_project.keys().map(|s| s.as_str()).collect();
     for (path, total) in &top {
-        let bar = render_stacked_bar(
-            &[(*total, '\u{1F7E7}')],
-            ((PROJECT_BAR_WIDTH as f64 * (*total as f64) / max_total as f64).round() as usize)
-                .max(1),
+        let bar = render_stacked_bar_with(
+            &[
+                (*total, '\u{1F7E7}'),
+                (max_total.saturating_sub(*total), BAR_EMPTY),
+            ],
+            PROJECT_BAR_WIDTH,
+            BAR_EMPTY,
         );
         let name = short_name(path, &all_paths);
-        let label = format!("{:<24} {:>7}  {}", name, humanize_tokens(*total), bar);
+        let label = format!(
+            "{}  {}  {}",
+            pad_left_figure(&humanize_tokens(*total), TOKEN_COL_WIDTH),
+            bar,
+            name,
+        );
         let _ = sub.append(&MenuItem::new(label, false, None));
     }
     sub
@@ -195,6 +220,19 @@ fn humanize_tokens(n: u64) -> String {
         n.to_string()
     }
 }
+
+/// Left-pad `s` with figure-spaces (U+2007) to `width` chars. Figure spaces
+/// are designed to match the width of a digit in proportional fonts, so
+/// they keep numeric columns aligned in menu labels rendered in SF.
+fn pad_left_figure(s: &str, width: usize) -> String {
+    let chars = s.chars().count();
+    if chars >= width {
+        return s.to_string();
+    }
+    let pad: String = std::iter::repeat_n(FIG_SPACE, width - chars).collect();
+    format!("{pad}{s}")
+}
+
 
 /// Menu bar title shown beside the icon. Empty when there's no data yet.
 pub fn title_for(state: &AppState) -> String {
@@ -281,6 +319,27 @@ mod tests {
         let mut s = AppState::new(false);
         s.data = DataState::AuthRequired;
         assert_eq!(bands_for(&s), (Band::Red, Band::Red));
+    }
+
+    #[test]
+    fn pad_left_figure_fills_with_figure_space() {
+        let s = pad_left_figure("47", 5);
+        assert_eq!(s.chars().count(), 5);
+        assert_eq!(s.chars().filter(|c| *c == '\u{2007}').count(), 3);
+        assert!(s.ends_with("47"));
+    }
+
+    #[test]
+    fn pad_left_figure_leaves_overlong_alone() {
+        assert_eq!(pad_left_figure("123456", 4), "123456");
+    }
+
+    #[test]
+    fn humanize_tokens_scales() {
+        assert_eq!(humanize_tokens(42), "42");
+        assert_eq!(humanize_tokens(1500), "2K");
+        assert_eq!(humanize_tokens(1_200_000), "1.2M");
+        assert_eq!(humanize_tokens(2_500_000_000), "2.5B");
     }
 
     #[test]

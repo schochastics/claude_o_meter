@@ -22,11 +22,18 @@ pub fn render_bar(fraction: f64, width: usize) -> String {
 /// occupies `round(count / total * width)` cells, in order. Any trailing
 /// cells (rounding slack, or zero total) are filled with EMPTY.
 pub fn render_stacked_bar(segments: &[(u64, char)], width: usize) -> String {
+    render_stacked_bar_with(segments, width, EMPTY)
+}
+
+/// `render_stacked_bar` with a caller-chosen empty char — use `⬜` for
+/// chart bars (same visual width as colored emoji squares, so the column
+/// after the bar lands at a consistent pixel offset).
+pub fn render_stacked_bar_with(segments: &[(u64, char)], width: usize, empty: char) -> String {
     let total: u64 = segments.iter().map(|(n, _)| *n).sum();
     let mut s = String::with_capacity(width * 4);
     if total == 0 {
         for _ in 0..width {
-            s.push(EMPTY);
+            s.push(empty);
         }
         return s;
     }
@@ -43,7 +50,7 @@ pub fn render_stacked_bar(segments: &[(u64, char)], width: usize) -> String {
         }
     }
     for _ in used..width {
-        s.push(EMPTY);
+        s.push(empty);
     }
     s
 }
