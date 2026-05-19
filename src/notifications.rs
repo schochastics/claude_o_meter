@@ -189,4 +189,40 @@ mod tests {
         assert_eq!(session_titles.len(), 1);
         assert_eq!(weekly_titles.len(), 1);
     }
+
+    #[test]
+    fn empty_thresholds_never_fires() {
+        let mut t = ThresholdTracker::new(Vec::new());
+        let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
+        assert_eq!(t.observe(&resp(Some(0.99), Some(0.99), r)).len(), 0);
+    }
+
+    #[test]
+    fn unsorted_thresholds_each_fire_once() {
+        let mut t = ThresholdTracker::new(vec![0.95, 0.75, 0.90]);
+        let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
+        // Jumping straight to 0.99 should fire all three exactly once.
+        let n = t.observe(&resp(Some(0.99), None, r));
+        assert_eq!(n.len(), 3);
+        // No re-fire on subsequent observations within the same window.
+        assert_eq!(t.observe(&resp(Some(1.0), None, r)).len(), 0);
+    }
+
+    #[test]
+    fn nan_utilization_never_fires() {
+        let mut t = ThresholdTracker::default();
+        let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
+        // NaN >= t is always false, so no notifications should be produced.
+        assert_eq!(t.observe(&resp(Some(f64::NAN), None, r)).len(), 0);
+    }
+
+    #[test]
+    fn exact_threshold_value_fires() {
+        let mut t = ThresholdTracker::default();
+        let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
+        // Utilization exactly equal to a threshold (0.75) should fire.
+        let n = t.observe(&resp(Some(0.75), None, r));
+        assert_eq!(n.len(), 1);
+        assert!(n[0].title.contains("75"));
+    }
 }

@@ -104,7 +104,11 @@ async fn poll_once() -> Result<UsageResponse, PollError> {
     if creds.is_expired(chrono::Utc::now()) {
         return Err(PollError::AuthRequired);
     }
-    let client = ApiClient::new(creds.access_token);
+    let client = ApiClient::new(creds.access_token).map_err(|e| match e {
+        FetchError::Unauthorized => PollError::AuthRequired,
+        FetchError::RateLimited { retry_after } => PollError::RateLimited { retry_after },
+        other => PollError::Transient(other.to_string()),
+    })?;
     client.fetch().await.map_err(|e| match e {
         FetchError::Unauthorized => PollError::AuthRequired,
         FetchError::RateLimited { retry_after } => PollError::RateLimited { retry_after },

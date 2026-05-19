@@ -34,14 +34,28 @@ fn settings_path() -> Result<PathBuf> {
 
 impl Settings {
     pub fn load() -> Self {
-        match settings_path().and_then(|p| {
-            let bytes = std::fs::read(&p).with_context(|| format!("read {p:?}"))?;
-            let s: Settings = serde_json::from_slice(&bytes).context("decode settings.json")?;
-            Ok(s)
-        }) {
+        let Ok(path) = settings_path() else {
+            return Settings::default();
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Settings::default(),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "settings.json unreadable; using defaults");
+                return Settings::default();
+            }
+        };
+        match serde_json::from_slice(&bytes) {
             Ok(s) => s,
             Err(e) => {
-                tracing::debug!(error = %e, "settings load failed; using defaults");
+                let backup = path.with_extension("json.bak");
+                tracing::warn!(
+                    path = %path.display(),
+                    backup = %backup.display(),
+                    error = %e,
+                    "settings.json malformed; backing up and using defaults",
+                );
+                let _ = std::fs::rename(&path, &backup);
                 Settings::default()
             }
         }

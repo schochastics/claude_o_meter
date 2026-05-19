@@ -112,17 +112,18 @@ impl UsageResponse {
 
 fn humanize_model(suffix: &str) -> String {
     // "sonnet" -> "Sonnet", "claude_design" -> "Claude Design"
-    suffix
-        .split('_')
-        .map(|p| {
-            let mut c = p.chars();
-            match c.next() {
-                Some(first) => first.to_uppercase().chain(c).collect::<String>(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut out = String::with_capacity(suffix.len());
+    for (i, part) in suffix.split('_').enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.extend(chars);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Error)]
@@ -146,21 +147,20 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    pub fn new(token: String) -> Self {
+    pub fn new(token: String) -> Result<Self, FetchError> {
         Self::new_with_base(token, BASE_URL.to_string())
     }
 
-    pub fn new_with_base(token: String, base_url: String) -> Self {
+    pub fn new_with_base(token: String, base_url: String) -> Result<Self, FetchError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("claude_o_meter/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("build reqwest client");
-        Self {
+            .build()?;
+        Ok(Self {
             http,
             token,
             base_url,
-        }
+        })
     }
 
     pub async fn fetch(&self) -> Result<UsageResponse, FetchError> {
@@ -308,5 +308,40 @@ mod tests {
         let sonnet_raw = r.extra.get("seven_day_sonnet").unwrap();
         let u = sonnet_raw.get("utilization").unwrap().as_f64().unwrap();
         assert!(close(u, 0.04));
+    }
+
+    #[test]
+    fn nan_utilization_is_left_untouched() {
+        // NaN > 1.5 is false, so normalize_scale leaves the response alone
+        // rather than producing NaN/0.0 from arithmetic on NaN.
+        let mut r = synth(f64::NAN);
+        r.normalize_scale();
+        assert!(r.five_hour.unwrap().utilization.is_nan());
+    }
+
+    #[test]
+    fn per_model_skips_malformed_extra_entries() {
+        let mut r = synth(0.5);
+        // Valid per-model entry.
+        r.extra.insert(
+            "seven_day_sonnet".into(),
+            serde_json::json!({
+                "utilization": 0.04,
+                "resets_at": "2026-05-19T17:00:00Z",
+            }),
+        );
+        // Malformed entry — missing resets_at; should be skipped gracefully.
+        r.extra.insert(
+            "seven_day_borked".into(),
+            serde_json::json!({"utilization": 0.99}),
+        );
+        // Wrong-shape entry — string instead of object; should also be skipped.
+        r.extra.insert(
+            "seven_day_string".into(),
+            serde_json::Value::String("nope".into()),
+        );
+        let per_model = r.per_model();
+        assert_eq!(per_model.len(), 1);
+        assert_eq!(per_model[0].0, "Sonnet");
     }
 }

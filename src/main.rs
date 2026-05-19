@@ -14,7 +14,7 @@ use std::time::Duration;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tokio::sync::mpsc as tokio_mpsc;
-use tray_icon::menu::MenuEvent;
+use tray_icon::menu::{MenuEvent, MenuId};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 #[derive(Debug)]
@@ -122,11 +122,7 @@ fn main() -> anyhow::Result<()> {
                         state.data = DataState::Error(msg);
                     }
                 }
-                let rebuilt = build_menu(&state);
-                refresh_id = rebuilt.refresh.id().clone();
-                login_id = rebuilt.launch_at_login.id().clone();
-                quit_id = rebuilt.quit.id().clone();
-                tray.set_menu(Some(Box::new(rebuilt.menu)));
+                rebuild_menu(&state, &tray, &mut refresh_id, &mut login_id, &mut quit_id);
                 let (left, right) = bands_for(&state);
                 tray.set_icon(Some(icon_for_split(left, right))).ok();
                 tray.set_tooltip(Some(title_for(&state))).ok();
@@ -134,11 +130,7 @@ fn main() -> anyhow::Result<()> {
             }
             Event::UserEvent(UserEvent::HistoryTick(agg)) => {
                 state.history = Some(agg);
-                let rebuilt = build_menu(&state);
-                refresh_id = rebuilt.refresh.id().clone();
-                login_id = rebuilt.launch_at_login.id().clone();
-                quit_id = rebuilt.quit.id().clone();
-                tray.set_menu(Some(Box::new(rebuilt.menu)));
+                rebuild_menu(&state, &tray, &mut refresh_id, &mut login_id, &mut quit_id);
             }
             _ => {}
         }
@@ -156,17 +148,27 @@ fn main() -> anyhow::Result<()> {
                         tracing::error!(error = %e, "launch-at-login toggle failed");
                     }
                 }
-                let rebuilt = build_menu(&state);
-                refresh_id = rebuilt.refresh.id().clone();
-                login_id = rebuilt.launch_at_login.id().clone();
-                quit_id = rebuilt.quit.id().clone();
-                tray.set_menu(Some(Box::new(rebuilt.menu)));
+                rebuild_menu(&state, &tray, &mut refresh_id, &mut login_id, &mut quit_id);
             } else if menu_event.id == quit_id {
                 let _ = settings.save();
                 *control_flow = ControlFlow::Exit;
             }
         }
     });
+}
+
+fn rebuild_menu(
+    state: &AppState,
+    tray: &TrayIcon,
+    refresh_id: &mut MenuId,
+    login_id: &mut MenuId,
+    quit_id: &mut MenuId,
+) {
+    let rebuilt = build_menu(state);
+    *refresh_id = rebuilt.refresh.id().clone();
+    *login_id = rebuilt.launch_at_login.id().clone();
+    *quit_id = rebuilt.quit.id().clone();
+    tray.set_menu(Some(Box::new(rebuilt.menu)));
 }
 
 fn projects_dir() -> Option<PathBuf> {
@@ -209,7 +211,7 @@ fn spawn_history_loop(
         loop {
             let proj = proj_dir_owned.clone();
             let cache = cache_path_owned.clone();
-            let mut working = agg.clone();
+            let mut working = agg;
             let scanned = tokio::task::spawn_blocking(move || {
                 let changed = working.refresh(&proj).unwrap_or(false);
                 if changed
@@ -221,14 +223,21 @@ fn spawn_history_loop(
                 (changed, working)
             })
             .await;
-            if let Ok((changed, updated)) = scanned
-                && changed
-            {
-                agg = updated.clone();
-                if tx.send(updated).is_err() {
-                    break;
+            agg = match scanned {
+                Ok((changed, updated)) => {
+                    if changed {
+                        let to_send = updated.clone();
+                        if tx.send(to_send).is_err() {
+                            break;
+                        }
+                    }
+                    updated
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(error = %e, "history refresh task panicked; resetting");
+                    Aggregates::default()
+                }
+            };
             tokio::time::sleep(Duration::from_secs(5 * 60)).await;
         }
     });

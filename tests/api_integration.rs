@@ -10,7 +10,7 @@ async fn server() -> MockServer {
 }
 
 fn client(server: &MockServer) -> ApiClient {
-    ApiClient::new_with_base("test-token".into(), server.uri())
+    ApiClient::new_with_base("test-token".into(), server.uri()).expect("build client")
 }
 
 #[tokio::test]

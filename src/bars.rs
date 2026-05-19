@@ -44,17 +44,22 @@ pub fn render_bar_rgba(segments: &[(u64, [u8; 3])], scale_basis: u64, theme: &Th
 }
 
 /// Single-color bar — convenience for session / weekly / per-model / per-project.
+/// NaN and negative fractions render as empty; fractions above 1.0 clamp to full.
 pub fn render_solid_bar_rgba(fraction: f64, color: [u8; 3], theme: &Theme) -> Vec<u8> {
-    let f = fraction.clamp(0.0, 1.0);
+    let f = if fraction.is_nan() {
+        0.0
+    } else {
+        fraction.clamp(0.0, 1.0)
+    };
     let cells = (f * CANVAS_W as f64).round() as u64;
     let basis = CANVAS_W as u64;
     render_bar_rgba(&[(cells, color)], basis, theme)
 }
 
 fn fill(rgba: [u8; 4]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity((CANVAS_W * CANVAS_H * 4) as usize);
-    for _ in 0..(CANVAS_W * CANVAS_H) {
-        buf.extend_from_slice(&rgba);
+    let mut buf = vec![0u8; (CANVAS_W * CANVAS_H * 4) as usize];
+    for chunk in buf.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&rgba);
     }
     buf
 }
@@ -63,6 +68,7 @@ fn paint_band(buf: &mut [u8], x_start: u32, x_end: u32, rgb: [u8; 3]) {
     if x_end <= x_start {
         return;
     }
+    // Alpha was already set to 0xFF by `fill`; we only need to overwrite RGB.
     for y in 0..CANVAS_H {
         let row_start = (y * CANVAS_W * 4) as usize;
         for x in x_start..x_end {
@@ -70,7 +76,6 @@ fn paint_band(buf: &mut [u8], x_start: u32, x_end: u32, rgb: [u8; 3]) {
             buf[i] = rgb[0];
             buf[i + 1] = rgb[1];
             buf[i + 2] = rgb[2];
-            buf[i + 3] = 0xFF;
         }
     }
 }
@@ -143,5 +148,25 @@ mod tests {
         let buf = render_solid_bar_rgba(0.5, [255, 128, 0], &light_theme());
         assert_eq!(pixel(&buf, CANVAS_W / 4, 0)[..3], [255, 128, 0]);
         assert_eq!(pixel(&buf, (CANVAS_W * 3) / 4, 0), light_theme().empty_bg);
+    }
+
+    #[test]
+    fn solid_bar_nan_renders_empty() {
+        let buf = render_solid_bar_rgba(f64::NAN, [255, 0, 0], &light_theme());
+        assert_eq!(pixel(&buf, 0, 0), light_theme().empty_bg);
+        assert_eq!(pixel(&buf, CANVAS_W - 1, 0), light_theme().empty_bg);
+    }
+
+    #[test]
+    fn solid_bar_over_one_clamps_full() {
+        let buf = render_solid_bar_rgba(1.5, [0, 200, 0], &light_theme());
+        assert_eq!(pixel(&buf, 0, 0)[..3], [0, 200, 0]);
+        assert_eq!(pixel(&buf, CANVAS_W - 1, 0)[..3], [0, 200, 0]);
+    }
+
+    #[test]
+    fn solid_bar_negative_renders_empty() {
+        let buf = render_solid_bar_rgba(-0.5, [255, 0, 0], &light_theme());
+        assert_eq!(pixel(&buf, 0, 0), light_theme().empty_bg);
     }
 }
