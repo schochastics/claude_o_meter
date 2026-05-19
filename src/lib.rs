@@ -2,6 +2,7 @@ pub mod api;
 pub mod app_state;
 pub mod bars;
 pub mod credentials;
+pub mod history;
 pub mod icons;
 pub mod launch_at_login;
 pub mod menu;

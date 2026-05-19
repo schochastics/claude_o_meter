@@ -1,11 +1,12 @@
 //! Build the tray dropdown menu from the current AppState.
 
 use crate::app_state::{AppState, DataState};
-use crate::bars::render_bar;
+use crate::bars::{render_bar, render_stacked_bar};
+use crate::history::{short_name, Aggregates};
 use crate::icons::Band;
 use crate::time_fmt::resets_in;
-use chrono::Utc;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use chrono::{Local, Utc};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 pub struct MenuIds {
     pub menu: Menu,
@@ -80,6 +81,11 @@ pub fn build_menu(state: &AppState) -> MenuIds {
         }
     }
 
+    if let Some(history) = state.history.as_ref() {
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        append_history_section(&menu, history);
+    }
+
     let _ = menu.append(&PredefinedMenuItem::separator());
     let refresh = MenuItem::new("Refresh now", true, None);
     let launch_at_login =
@@ -91,6 +97,103 @@ pub fn build_menu(state: &AppState) -> MenuIds {
     let _ = menu.append(&quit);
 
     MenuIds { menu, refresh, launch_at_login, quit }
+}
+
+const DAY_BAR_WIDTH: usize = 20;
+const PROJECT_BAR_WIDTH: usize = 14;
+const TOP_PROJECTS_N: usize = 8;
+
+/// Render the History block: 7-day stacked bars + Top-projects submenus.
+fn append_history_section(menu: &Menu, h: &Aggregates) {
+    let today = Local::now().date_naive();
+    let days = h.last_n_days(7, today);
+    let max_total: u64 = days.iter().map(|(_, t)| t.sum()).max().unwrap_or(0);
+    let week_total: u64 = days.iter().map(|(_, t)| t.sum()).sum();
+
+    let header = MenuItem::new(
+        format!("History — last 7d: {}", humanize_tokens(week_total)),
+        false,
+        None,
+    );
+    let _ = menu.append(&header);
+
+    let legend = MenuItem::new(
+        "  \u{1F7E6} in   \u{1F7E7} out   \u{1F7EA} cwrite   \u{1F7E9} cread",
+        false,
+        None,
+    );
+    let _ = menu.append(&legend);
+
+    for (date, totals) in days {
+        let row_total = totals.sum();
+        let cells = if max_total == 0 {
+            0
+        } else {
+            (DAY_BAR_WIDTH as f64 * row_total as f64 / max_total as f64).round() as usize
+        };
+        let bar = if cells == 0 {
+            String::new()
+        } else {
+            render_stacked_bar(
+                &[
+                    (totals.input, '\u{1F7E6}'),
+                    (totals.output, '\u{1F7E7}'),
+                    (totals.cache_creation, '\u{1F7EA}'),
+                    (totals.cache_read, '\u{1F7E9}'),
+                ],
+                cells,
+            )
+        };
+        let label = format!(
+            "  {}  {:>6}  {}",
+            date.format("%a %m-%d"),
+            humanize_tokens(row_total),
+            bar
+        );
+        let _ = menu.append(&MenuItem::new(label, false, None));
+    }
+
+    let since_7d = today - chrono::Duration::days(6);
+    let _ = menu.append(&top_projects_submenu("Top projects (7d) \u{25B8}", h, Some(since_7d)));
+    let _ = menu.append(&top_projects_submenu(
+        "Top projects (all-time) \u{25B8}",
+        h,
+        None,
+    ));
+}
+
+fn top_projects_submenu(label: &str, h: &Aggregates, since: Option<chrono::NaiveDate>) -> Submenu {
+    let sub = Submenu::new(label, true);
+    let top = h.top_projects(TOP_PROJECTS_N, since);
+    if top.is_empty() {
+        let _ = sub.append(&MenuItem::new("(no data)", false, None));
+        return sub;
+    }
+    let max_total = top.first().map(|(_, n)| *n).unwrap_or(0);
+    let all_paths: Vec<&str> = h.by_project.keys().map(|s| s.as_str()).collect();
+    for (path, total) in &top {
+        let bar = render_stacked_bar(
+            &[(*total, '\u{1F7E7}')],
+            ((PROJECT_BAR_WIDTH as f64 * (*total as f64) / max_total as f64).round() as usize)
+                .max(1),
+        );
+        let name = short_name(path, &all_paths);
+        let label = format!("{:<24} {:>7}  {}", name, humanize_tokens(*total), bar);
+        let _ = sub.append(&MenuItem::new(label, false, None));
+    }
+    sub
+}
+
+fn humanize_tokens(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// Menu bar title shown beside the icon. Empty when there's no data yet.

@@ -15,7 +15,7 @@ serde_json = "1"
 smappservice-rs = "0.1"
 tao = "0.35"
 thiserror = "2.0.18"
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.24"
