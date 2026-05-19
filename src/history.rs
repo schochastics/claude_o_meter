@@ -205,7 +205,7 @@ impl Aggregates {
             }
         }
         let mut out: Vec<(String, u64)> = acc.into_iter().collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|(_, total)| std::cmp::Reverse(*total));
         out.truncate(n);
         out
     }
