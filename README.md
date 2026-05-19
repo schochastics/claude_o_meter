@@ -1,6 +1,7 @@
 # Claude-O-Meter
 
-A macOS menu bar app that shows Claude Code session + weekly quota usage at a glance. Rust rebuild of [JackBhanded/claude-meter](https://github.com/JackBhanded/claude-meter) (which targets Windows / Python).
+A macOS menu bar app that shows Claude Code session + weekly quota usage at a
+glance. 
 
 The menu bar shows `● 47%` — a colored dot (blue → green → orange → red as utilization climbs) and the higher of session/weekly utilization. Click for the full breakdown: session bar with reset countdown, weekly bar, per-model split, refresh, launch-at-login, quit.
 
