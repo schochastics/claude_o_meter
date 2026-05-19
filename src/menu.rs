@@ -66,6 +66,9 @@ pub fn build_menu(state: &AppState) -> MenuIds {
                     now,
                     &theme,
                 ));
+                if let Some(line) = burn_rate_line(w.utilization, w.resets_at, now) {
+                    let _ = menu.append(&MenuItem::new(line, false, None));
+                }
             }
 
             let per_model = usage.per_model();
@@ -105,6 +108,9 @@ pub fn build_menu(state: &AppState) -> MenuIds {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let today = Local::now().date_naive();
         let _ = menu.append(&history_submenu(history, today, &theme));
+        if let Some(line) = monthly_line(history, today) {
+            let _ = menu.append(&MenuItem::new(line, false, None));
+        }
         let _ = menu.append(&top_projects_submenu(
             "Top projects (7d) \u{25B8}",
             history,
@@ -242,6 +248,66 @@ fn humanize_tokens(n: u64) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// Weekly burn-rate projection. Returns a short status string to render as a
+/// disabled menu row beneath the Weekly window. `None` when the window is too
+/// fresh to make a useful projection (need ≥ 6h elapsed and ≥ 5% utilized).
+fn burn_rate_line(
+    utilization: f64,
+    resets_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> Option<String> {
+    const WINDOW_HOURS: f64 = 7.0 * 24.0;
+    if !utilization.is_finite() {
+        return None;
+    }
+    if utilization >= 1.0 {
+        return Some("Pace: at cap".to_string());
+    }
+    let hours_remaining = (resets_at - now).num_seconds() as f64 / 3600.0;
+    let hours_elapsed = WINDOW_HOURS - hours_remaining;
+    if hours_elapsed < 6.0 || utilization < 0.05 {
+        return None;
+    }
+    let pace_per_hour = utilization / hours_elapsed;
+    let hours_until_cap = (1.0 - utilization) / pace_per_hour;
+    if hours_until_cap >= hours_remaining {
+        Some("Pace: on track to reset under cap".to_string())
+    } else {
+        Some(format!("Pace: cap in {}", humanize_hours(hours_until_cap)))
+    }
+}
+
+fn humanize_hours(h: f64) -> String {
+    if h < 1.0 {
+        let m = (h * 60.0).round().max(1.0) as i64;
+        format!("{m}m")
+    } else if h < 24.0 {
+        format!("{}h", h.round() as i64)
+    } else {
+        let days = (h / 24.0).floor() as i64;
+        let rem_h = (h - days as f64 * 24.0).round() as i64;
+        if rem_h == 0 {
+            format!("{days}d")
+        } else {
+            format!("{days}d {rem_h}h")
+        }
+    }
+}
+
+/// Tokens-this-calendar-month with linear projection to month-end. Returns
+/// `None` if there's no usage data for the current month yet.
+fn monthly_line(history: &Aggregates, today: chrono::NaiveDate) -> Option<String> {
+    let (current, projected) = history.current_month_total_and_projection(today);
+    if current == 0 {
+        return None;
+    }
+    Some(format!(
+        "Month: {} (proj {})",
+        humanize_tokens(current),
+        humanize_tokens(projected),
+    ))
 }
 
 /// Left-pad `s` with figure-spaces (U+2007) to `width` chars. Figure spaces
@@ -388,6 +454,69 @@ mod tests {
         assert_eq!(humanize_tokens(1500), "2K");
         assert_eq!(humanize_tokens(1_200_000), "1.2M");
         assert_eq!(humanize_tokens(2_500_000_000), "2.5B");
+    }
+
+    fn ts(year: i32, month: u32, day: u32, hour: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn burn_rate_none_when_window_too_fresh() {
+        // Window just started (1h elapsed) — too noisy to project.
+        let resets = ts(2026, 5, 26, 12);
+        let now = resets - chrono::Duration::hours(167);
+        assert_eq!(burn_rate_line(0.5, resets, now), None);
+    }
+
+    #[test]
+    fn burn_rate_none_when_utilization_too_low() {
+        let resets = ts(2026, 5, 26, 12);
+        let now = resets - chrono::Duration::hours(100);
+        // 68h elapsed but only 1% used → too low to project.
+        assert_eq!(burn_rate_line(0.01, resets, now), None);
+    }
+
+    #[test]
+    fn burn_rate_on_track_when_pace_slow() {
+        let resets = ts(2026, 5, 26, 12);
+        // 84h elapsed (halfway through window), 30% used → pace will reset under cap.
+        let now = resets - chrono::Duration::hours(84);
+        let line = burn_rate_line(0.30, resets, now).unwrap();
+        assert!(line.contains("on track"), "got: {line}");
+    }
+
+    #[test]
+    fn burn_rate_warns_when_pace_will_exceed_cap() {
+        let resets = ts(2026, 5, 26, 12);
+        // 24h elapsed, 50% used → at this pace, cap in ~24h, well before reset.
+        let now = resets - chrono::Duration::hours(144);
+        let line = burn_rate_line(0.50, resets, now).unwrap();
+        assert!(line.contains("cap in"), "got: {line}");
+    }
+
+    #[test]
+    fn burn_rate_at_cap() {
+        let resets = ts(2026, 5, 26, 12);
+        let now = resets - chrono::Duration::hours(50);
+        assert_eq!(
+            burn_rate_line(1.0, resets, now),
+            Some("Pace: at cap".to_string())
+        );
+    }
+
+    #[test]
+    fn burn_rate_nan_yields_none() {
+        let resets = ts(2026, 5, 26, 12);
+        let now = resets - chrono::Duration::hours(50);
+        assert_eq!(burn_rate_line(f64::NAN, resets, now), None);
+    }
+
+    #[test]
+    fn humanize_hours_formats_buckets() {
+        assert_eq!(humanize_hours(0.25), "15m");
+        assert_eq!(humanize_hours(3.4), "3h");
+        assert_eq!(humanize_hours(48.0), "2d");
+        assert_eq!(humanize_hours(50.0), "2d 2h");
     }
 
     #[test]

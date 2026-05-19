@@ -7,7 +7,7 @@
 //! re-parsed. Result is persisted as JSON so restarts populate instantly.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -164,6 +164,34 @@ impl Aggregates {
                 (d, t)
             })
             .collect()
+    }
+
+    /// Total tokens in the current calendar month plus a linear projection
+    /// to month-end. Returns `(current_total, projected_total)`. When no
+    /// days have elapsed yet (impossible in practice), the projection equals
+    /// the current total.
+    pub fn current_month_total_and_projection(&self, today: NaiveDate) -> (u64, u64) {
+        let Some(month_start) = today.with_day(1) else {
+            return (0, 0);
+        };
+        let next_month_start = if today.month() == 12 {
+            NaiveDate::from_ymd_opt(today.year() + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(today.year(), today.month() + 1, 1)
+        };
+        let Some(next_month_start) = next_month_start else {
+            return (0, 0);
+        };
+        let days_in_month = (next_month_start - month_start).num_days().max(1) as u64;
+        let days_elapsed = ((today - month_start).num_days() + 1).max(1) as u64;
+
+        let current: u64 = self
+            .by_day
+            .range(month_start..next_month_start)
+            .map(|(_, t)| t.sum())
+            .sum();
+        let projected = current.saturating_mul(days_in_month) / days_elapsed;
+        (current, projected)
     }
 
     /// Top projects by total tokens, optionally restricted to activity on
@@ -490,6 +518,72 @@ mod tests {
         // Most recent day is at the end; the day with data isn't today.
         assert_eq!(days.last().unwrap().0, today);
         assert_eq!(days.last().unwrap().1.sum(), 0);
+    }
+
+    fn agg_with_days(days: &[(NaiveDate, u64)]) -> Aggregates {
+        let mut agg = Aggregates::default();
+        for (d, n) in days {
+            agg.by_day.insert(
+                *d,
+                Totals {
+                    input: *n,
+                    ..Default::default()
+                },
+            );
+        }
+        agg
+    }
+
+    #[test]
+    fn monthly_projection_extrapolates_to_month_end() {
+        // Two days into May (the 1st and the 2nd), 100 tokens each → 200 over 2 days.
+        let agg = agg_with_days(&[
+            (NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(), 100),
+            (NaiveDate::from_ymd_opt(2026, 5, 2).unwrap(), 100),
+        ]);
+        let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let (current, projected) = agg.current_month_total_and_projection(today);
+        assert_eq!(current, 200);
+        assert_eq!(projected, 200 * 31 / 2);
+    }
+
+    #[test]
+    fn monthly_projection_excludes_prior_months() {
+        let agg = agg_with_days(&[
+            // April 30 — should NOT be counted toward May's total.
+            (NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(), 99_999),
+            (NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(), 50),
+        ]);
+        let today = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        let (current, _) = agg.current_month_total_and_projection(today);
+        assert_eq!(current, 50);
+    }
+
+    #[test]
+    fn monthly_projection_zero_when_no_data() {
+        let agg = Aggregates::default();
+        let today = NaiveDate::from_ymd_opt(2026, 5, 15).unwrap();
+        assert_eq!(agg.current_month_total_and_projection(today), (0, 0));
+    }
+
+    #[test]
+    fn monthly_projection_handles_december_rollover() {
+        // December → next month is January of next year; must not panic.
+        let agg = agg_with_days(&[(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(), 100)]);
+        let today = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
+        let (current, projected) = agg.current_month_total_and_projection(today);
+        assert_eq!(current, 100);
+        assert_eq!(projected, 100 * 31);
+    }
+
+    #[test]
+    fn monthly_projection_february_non_leap() {
+        let agg = agg_with_days(&[(NaiveDate::from_ymd_opt(2026, 2, 14).unwrap(), 140)]);
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).unwrap();
+        // 2026 is non-leap, so Feb has 28 days; 14 days elapsed → projection = 140 * 28 / 14 = 280.
+        let (current, projected) = agg.current_month_total_and_projection(today);
+        assert_eq!(current, 140);
+        assert_eq!(projected, 280);
     }
 
     #[test]
