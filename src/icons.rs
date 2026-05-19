@@ -1,13 +1,12 @@
-//! Tray icons drawn at runtime as raw RGBA buffers.
-//!
-//! The shape is a stylized 8-point sparkle (a "burst") meant to evoke
-//! Claude's wordmark glyph: 4 long N/S/E/W rays plus 4 shorter diagonal
-//! rays. The whole sparkle is tinted by the current `Band` so utilization
-//! reads at a glance.
+//! Tray icons built by tinting a precomputed alpha mask of the Claude AI
+//! symbol. The mask is rasterized from `assets/claude_symbol.svg` at build
+//! time (see `build.rs`) and embedded as a raw byte blob — no SVG or raster
+//! dependencies survive into the runtime binary.
 
 use tray_icon::Icon;
 
-const SIZE: u32 = 22; // macOS menu bar standard height
+const ICON_SIZE: u32 = 44;
+const ICON_MASK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_mask.bin"));
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Band {
@@ -42,79 +41,45 @@ impl Band {
 }
 
 pub fn icon_for(band: Band) -> Icon {
-    let rgba = render_sparkle(band, SIZE);
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("valid RGBA buffer")
+    Icon::from_rgba(tinted(band), ICON_SIZE, ICON_SIZE).expect("valid RGBA buffer")
+}
+
+pub fn icon_for_split(left: Band, right: Band) -> Icon {
+    Icon::from_rgba(tinted_split(left, right), ICON_SIZE, ICON_SIZE)
+        .expect("valid RGBA buffer")
 }
 
 pub fn auth_required_icon() -> Icon {
     icon_for(Band::Red)
 }
 
-/// Coverage (0..=1) of the sparkle at relative offset (dx, dy) from the
-/// center. The sparkle is the union of two astroids (4-pointed stars with
-/// pinched waists) — one cardinal-aligned (large) and one diagonal-aligned
-/// (smaller). This gives the Claude-style 8-point burst.
-fn sparkle_alpha(dx: f64, dy: f64, size: f64) -> f64 {
-    let cardinal_r = size * 0.50;
-    let diagonal_r = size * 0.32;
-
-    let a_cardinal = astroid_alpha(dx, dy, cardinal_r);
-
-    let cos45 = std::f64::consts::FRAC_1_SQRT_2;
-    let u = dx * cos45 + dy * cos45;
-    let v = -dx * cos45 + dy * cos45;
-    let a_diagonal = astroid_alpha(u, v, diagonal_r);
-
-    a_cardinal.max(a_diagonal)
-}
-
-/// Astroid (4-pointed star) coverage: |dx/r|^p + |dy/r|^p <= 1, with p < 1
-/// giving concave sides and pointed cardinal tips.
-fn astroid_alpha(dx: f64, dy: f64, r: f64) -> f64 {
-    let p = 0.6_f64;
-    let val = (dx.abs() / r).powf(p) + (dy.abs() / r).powf(p);
-    let inner = 0.85;
-    let outer = 1.05;
-    if val <= inner {
-        1.0
-    } else if val >= outer {
-        0.0
-    } else {
-        let t = (val - inner) / (outer - inner);
-        let s = t * t * (3.0 - 2.0 * t);
-        1.0 - s
-    }
-}
-
-fn render_sparkle(band: Band, size: u32) -> Vec<u8> {
+pub(crate) fn tinted(band: Band) -> Vec<u8> {
     let [r, g, b] = band.rgb();
-    let mut buf = vec![0u8; (size * size * 4) as usize];
-    let center = (size as f64 - 1.0) / 2.0;
-    let s = size as f64;
-
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f64 - center;
-            let dy = y as f64 - center;
-            let alpha = sparkle_alpha(dx, dy, s);
-            let i = ((y * size + x) * 4) as usize;
-            buf[i] = r;
-            buf[i + 1] = g;
-            buf[i + 2] = b;
-            buf[i + 3] = (alpha * 255.0).round() as u8;
-        }
+    let mut rgba = Vec::with_capacity(ICON_MASK.len() * 4);
+    for &a in ICON_MASK {
+        rgba.extend_from_slice(&[r, g, b, a]);
     }
-    buf
+    rgba
+}
+
+/// Tint the left half of the mask with `left.rgb()` and the right half with
+/// `right.rgb()`. Hard-edge split at the geometric midline.
+pub(crate) fn tinted_split(left: Band, right: Band) -> Vec<u8> {
+    let [lr, lg, lb] = left.rgb();
+    let [rr, rg, rb] = right.rgb();
+    let mid = ICON_SIZE / 2;
+    let mut rgba = Vec::with_capacity(ICON_MASK.len() * 4);
+    for (i, &a) in ICON_MASK.iter().enumerate() {
+        let x = (i as u32) % ICON_SIZE;
+        let [r, g, b] = if x < mid { [lr, lg, lb] } else { [rr, rg, rb] };
+        rgba.extend_from_slice(&[r, g, b, a]);
+    }
+    rgba
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn alpha_at(buf: &[u8], size: u32, x: u32, y: u32) -> u8 {
-        let i = ((y * size + x) * 4 + 3) as usize;
-        buf[i]
-    }
 
     #[test]
     fn band_thresholds() {
@@ -129,49 +94,75 @@ mod tests {
     }
 
     #[test]
-    fn sparkle_has_correct_size() {
-        let buf = render_sparkle(Band::Blue, 22);
-        assert_eq!(buf.len(), 22 * 22 * 4);
+    fn mask_has_correct_size() {
+        assert_eq!(ICON_MASK.len(), (ICON_SIZE * ICON_SIZE) as usize);
     }
 
     #[test]
-    fn center_pixel_is_opaque() {
-        let buf = render_sparkle(Band::Blue, 22);
-        assert_eq!(alpha_at(&buf, 22, 11, 11), 255);
+    fn mask_has_lit_and_unlit_pixels() {
+        assert!(ICON_MASK.iter().any(|&a| a > 200), "no opaque pixels");
+        assert!(ICON_MASK.contains(&0), "no transparent pixels");
     }
 
     #[test]
-    fn corner_pixel_is_transparent() {
-        let buf = render_sparkle(Band::Blue, 22);
-        assert_eq!(alpha_at(&buf, 22, 0, 0), 0);
-        assert_eq!(alpha_at(&buf, 22, 21, 21), 0);
+    fn tint_uses_band_color() {
+        // Find an opaque mask pixel and check it carries the band's RGB.
+        let opaque_idx = ICON_MASK.iter().position(|&a| a > 200).unwrap();
+        let rgba = tinted(Band::Green);
+        let off = opaque_idx * 4;
+        assert_eq!(&rgba[off..off + 3], &Band::Green.rgb());
+        assert!(rgba[off + 3] > 200);
     }
 
     #[test]
-    fn cardinal_arms_are_lit() {
-        // Each cardinal arm should be clearly visible well past the body.
-        let buf = render_sparkle(Band::Blue, 22);
-        assert!(alpha_at(&buf, 22, 18, 11) > 100, "east arm");
-        assert!(alpha_at(&buf, 22, 3, 11) > 100, "west arm");
-        assert!(alpha_at(&buf, 22, 11, 18) > 100, "south arm");
-        assert!(alpha_at(&buf, 22, 11, 3) > 100, "north arm");
+    fn tint_preserves_alpha() {
+        let rgba = tinted(Band::Blue);
+        for (i, &a) in ICON_MASK.iter().enumerate() {
+            assert_eq!(rgba[i * 4 + 3], a);
+        }
     }
 
     #[test]
-    fn diagonals_are_visible_but_shorter() {
-        let buf = render_sparkle(Band::Blue, 22);
-        // Mid-diagonal pixel inside the smaller diagonal star.
-        assert!(alpha_at(&buf, 22, 14, 14) > 100);
-        // The far corner is outside both the cardinal and diagonal stars.
-        assert_eq!(alpha_at(&buf, 22, 19, 19), 0);
+    fn rgba_buffer_has_correct_length() {
+        let rgba = tinted(Band::Red);
+        assert_eq!(rgba.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
     }
 
     #[test]
-    fn empty_band_between_cardinals_and_diagonals() {
-        // Between an arm direction and a diagonal there is open space.
-        // (x=18, y=14) sits between the east arm and the SE diagonal,
-        // well beyond the radius of either star.
-        let buf = render_sparkle(Band::Blue, 22);
-        assert_eq!(alpha_at(&buf, 22, 18, 14), 0);
+    fn split_tint_left_half_uses_left_rgb() {
+        let rgba = tinted_split(Band::Blue, Band::Red);
+        let mid = ICON_SIZE / 2;
+        let idx = ICON_MASK
+            .iter()
+            .enumerate()
+            .find(|(i, a)| **a > 200 && (*i as u32) % ICON_SIZE < mid)
+            .expect("an opaque mask pixel in left half")
+            .0;
+        let off = idx * 4;
+        assert_eq!(&rgba[off..off + 3], &Band::Blue.rgb());
+        assert!(rgba[off + 3] > 200);
+    }
+
+    #[test]
+    fn split_tint_right_half_uses_right_rgb() {
+        let rgba = tinted_split(Band::Blue, Band::Red);
+        let mid = ICON_SIZE / 2;
+        let idx = ICON_MASK
+            .iter()
+            .enumerate()
+            .find(|(i, a)| **a > 200 && (*i as u32) % ICON_SIZE >= mid)
+            .expect("an opaque mask pixel in the right half")
+            .0;
+        let off = idx * 4;
+        assert_eq!(&rgba[off..off + 3], &Band::Red.rgb());
+        assert!(rgba[off + 3] > 200);
+    }
+
+    #[test]
+    fn split_tint_preserves_alpha() {
+        let rgba = tinted_split(Band::Blue, Band::Red);
+        for (i, &a) in ICON_MASK.iter().enumerate() {
+            assert_eq!(rgba[i * 4 + 3], a);
+        }
     }
 }

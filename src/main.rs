@@ -1,8 +1,8 @@
 use chrono::Utc;
 use claude_o_meter::app_state::{AppState, DataState};
-use claude_o_meter::icons::icon_for;
+use claude_o_meter::icons::icon_for_split;
 use claude_o_meter::launch_at_login;
-use claude_o_meter::menu::{band_for, build_menu, title_for};
+use claude_o_meter::menu::{bands_for, build_menu, title_for};
 use claude_o_meter::notifications::{dispatch, ThresholdTracker};
 use claude_o_meter::poller::{self, PollEvent};
 use claude_o_meter::settings::Settings;
@@ -75,11 +75,11 @@ fn main() -> anyhow::Result<()> {
     let mut login_id = initial.launch_at_login.id().clone();
     let mut quit_id = initial.quit.id().clone();
 
+    let (left, right) = bands_for(&state);
     let tray: TrayIcon = TrayIconBuilder::new()
         .with_menu(Box::new(initial.menu))
-        .with_icon(icon_for(band_for(&state)))
-        .with_title(title_for(&state))
-        .with_tooltip("claude_o_meter")
+        .with_icon(icon_for_split(left, right))
+        .with_tooltip(title_for(&state))
         .build()?;
 
     let menu_events = MenuEvent::receiver();
@@ -107,8 +107,10 @@ fn main() -> anyhow::Result<()> {
             login_id = rebuilt.launch_at_login.id().clone();
             quit_id = rebuilt.quit.id().clone();
             tray.set_menu(Some(Box::new(rebuilt.menu)));
-            tray.set_icon(Some(icon_for(band_for(&state)))).ok();
-            tray.set_title(Some(title_for(&state)));
+            let (left, right) = bands_for(&state);
+            tray.set_icon(Some(icon_for_split(left, right))).ok();
+            tray.set_tooltip(Some(title_for(&state))).ok();
+            tray.set_title(None::<&str>);
         }
 
         while let Ok(menu_event) = menu_events.try_recv() {

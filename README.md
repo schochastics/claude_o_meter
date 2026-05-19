@@ -1,4 +1,4 @@
-# claude_o_meter
+# Claude-O-Meter
 
 A macOS menu bar app that shows Claude Code session + weekly quota usage at a glance. Rust rebuild of [JackBhanded/claude-meter](https://github.com/JackBhanded/claude-meter) (which targets Windows / Python).
 
@@ -33,7 +33,7 @@ Running via `cargo run` works for development but **notifications will silently 
    security find-generic-password -s "Claude Code-credentials"
    ```
 2. Launch the app. macOS will prompt:
-   *"claude_o_meter wants to access your confidential information stored in 'Claude Code-credentials' in your keychain."*
+   *"Claude-O-Meter wants to access your confidential information stored in 'Claude Code-credentials' in your keychain."*
    Click **Always Allow** so the app can poll unattended.
 3. The dot turns from `…` (loading) to a color reflecting your usage.
 
@@ -87,3 +87,4 @@ log stream --predicate 'process == "claude_o_meter"'
 - [`mac-notification-sys`](https://docs.rs/mac-notification-sys) — native NSUserNotifications
 - [`smappservice-rs`](https://docs.rs/smappservice-rs) — SMAppService launch-at-login
 - [`cargo-bundle`](https://github.com/burtonageo/cargo-bundle) — `.app` packaging
+- Icon: [Claude AI symbol](https://commons.wikimedia.org/wiki/File:Claude_AI_symbol.svg) (CC0, via Wikimedia). "Claude" is a trademark of Anthropic. The SVG is rasterized to an alpha mask at build time (`build.rs` uses `resvg` / `usvg` / `tiny-skia`) and tinted per utilization band at runtime — no SVG dependencies in the shipped binary.
