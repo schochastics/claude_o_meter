@@ -91,13 +91,13 @@ pub fn build_menu(state: &AppState) -> MenuIds {
             let _ = menu.append(&MenuItem::new(line, false, None));
         }
         let _ = menu.append(&top_projects_submenu(
-            "Top projects (7d) \u{25B8}",
+            "Top projects (7d)",
             history,
             Some(today - chrono::Duration::days(6)),
             &theme,
         ));
         let _ = menu.append(&top_projects_submenu(
-            "Top projects (all-time) \u{25B8}",
+            "Top projects (all-time)",
             history,
             None,
             &theme,
@@ -151,10 +151,7 @@ fn history_submenu(h: &Aggregates, today: chrono::NaiveDate, theme: &Theme) -> S
     let week_total: u64 = days.iter().map(|(_, t)| t.sum()).sum();
 
     let sub = Submenu::new(
-        format!(
-            "History — last 7d: {} \u{25B8}",
-            humanize_tokens(week_total)
-        ),
+        format!("History — last 7d: {}", humanize_tokens(week_total)),
         true,
     );
 
