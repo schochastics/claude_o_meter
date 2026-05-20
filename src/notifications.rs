@@ -82,12 +82,12 @@ fn crossings(
     thresholds: &[f64],
     state: &mut WindowState,
     utilization: f64,
-    reset_at: DateTime<Utc>,
+    reset_at: Option<DateTime<Utc>>,
     label: &str,
     out: &mut Vec<Notification>,
 ) {
-    if state.reset_at != Some(reset_at) {
-        state.reset_at = Some(reset_at);
+    if state.reset_at != reset_at {
+        state.reset_at = reset_at;
         for slot in state.fired.iter_mut() {
             *slot = false;
         }
@@ -122,11 +122,11 @@ mod tests {
         UsageResponse {
             five_hour: session.map(|u| Window {
                 utilization: u,
-                resets_at: reset,
+                resets_at: Some(reset),
             }),
             seven_day: weekly.map(|u| Window {
                 utilization: u,
-                resets_at: reset,
+                resets_at: Some(reset),
             }),
             extra: BTreeMap::new(),
         }

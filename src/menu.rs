@@ -145,19 +145,18 @@ pub fn build_menu(state: &AppState) -> MenuIds {
 fn window_row(
     name: &str,
     utilization: f64,
-    resets_at: chrono::DateTime<Utc>,
+    resets_at: Option<chrono::DateTime<Utc>>,
     now: chrono::DateTime<Utc>,
     theme: &Theme,
 ) -> IconMenuItem {
     let pct = (utilization * 100.0).round() as i64;
     let band = Band::from_fraction(utilization);
     let bar = render_solid_bar_rgba(utilization, band.rgb(), theme);
-    IconMenuItem::new(
-        format!("{name}  {pct}%  {}", resets_in(resets_at, now)),
-        false,
-        Some(bar_icon(bar)),
-        None,
-    )
+    let label = match resets_at {
+        Some(t) => format!("{name}  {pct}%  {}", resets_in(t, now)),
+        None => format!("{name}  {pct}%"),
+    };
+    IconMenuItem::new(label, false, Some(bar_icon(bar)), None)
 }
 
 fn bar_icon(rgba: Vec<u8>) -> Icon {
@@ -252,10 +251,11 @@ fn humanize_tokens(n: u64) -> String {
 
 /// Weekly burn-rate projection. Returns a short status string to render as a
 /// disabled menu row beneath the Weekly window. `None` when the window is too
-/// fresh to make a useful projection (need ≥ 6h elapsed and ≥ 5% utilized).
+/// fresh to make a useful projection (need ≥ 6h elapsed and ≥ 5% utilized) or
+/// when the API hasn't reported `resets_at` yet.
 fn burn_rate_line(
     utilization: f64,
-    resets_at: chrono::DateTime<Utc>,
+    resets_at: Option<chrono::DateTime<Utc>>,
     now: chrono::DateTime<Utc>,
 ) -> Option<String> {
     const WINDOW_HOURS: f64 = 7.0 * 24.0;
@@ -265,6 +265,7 @@ fn burn_rate_line(
     if utilization >= 1.0 {
         return Some("Pace: at cap".to_string());
     }
+    let resets_at = resets_at?;
     let hours_remaining = (resets_at - now).num_seconds() as f64 / 3600.0;
     let hours_elapsed = WINDOW_HOURS - hours_remaining;
     if hours_elapsed < 6.0 || utilization < 0.05 {
@@ -384,11 +385,11 @@ mod tests {
         let usage = UsageResponse {
             five_hour: Some(Window {
                 utilization: 0.30,
-                resets_at: r,
+                resets_at: Some(r),
             }),
             seven_day: Some(Window {
                 utilization: 0.74,
-                resets_at: r,
+                resets_at: Some(r),
             }),
             extra: BTreeMap::new(),
         };
@@ -406,11 +407,11 @@ mod tests {
         let usage = UsageResponse {
             five_hour: Some(Window {
                 utilization: 0.95,
-                resets_at: r,
+                resets_at: Some(r),
             }),
             seven_day: Some(Window {
                 utilization: 0.20,
-                resets_at: r,
+                resets_at: Some(r),
             }),
             extra: BTreeMap::new(),
         };
@@ -465,7 +466,7 @@ mod tests {
         // Window just started (1h elapsed) — too noisy to project.
         let resets = ts(2026, 5, 26, 12);
         let now = resets - chrono::Duration::hours(167);
-        assert_eq!(burn_rate_line(0.5, resets, now), None);
+        assert_eq!(burn_rate_line(0.5, Some(resets), now), None);
     }
 
     #[test]
@@ -473,7 +474,7 @@ mod tests {
         let resets = ts(2026, 5, 26, 12);
         let now = resets - chrono::Duration::hours(100);
         // 68h elapsed but only 1% used → too low to project.
-        assert_eq!(burn_rate_line(0.01, resets, now), None);
+        assert_eq!(burn_rate_line(0.01, Some(resets), now), None);
     }
 
     #[test]
@@ -481,7 +482,7 @@ mod tests {
         let resets = ts(2026, 5, 26, 12);
         // 84h elapsed (halfway through window), 30% used → pace will reset under cap.
         let now = resets - chrono::Duration::hours(84);
-        let line = burn_rate_line(0.30, resets, now).unwrap();
+        let line = burn_rate_line(0.30, Some(resets), now).unwrap();
         assert!(line.contains("on track"), "got: {line}");
     }
 
@@ -490,7 +491,7 @@ mod tests {
         let resets = ts(2026, 5, 26, 12);
         // 24h elapsed, 50% used → at this pace, cap in ~24h, well before reset.
         let now = resets - chrono::Duration::hours(144);
-        let line = burn_rate_line(0.50, resets, now).unwrap();
+        let line = burn_rate_line(0.50, Some(resets), now).unwrap();
         assert!(line.contains("cap in"), "got: {line}");
     }
 
@@ -499,7 +500,7 @@ mod tests {
         let resets = ts(2026, 5, 26, 12);
         let now = resets - chrono::Duration::hours(50);
         assert_eq!(
-            burn_rate_line(1.0, resets, now),
+            burn_rate_line(1.0, Some(resets), now),
             Some("Pace: at cap".to_string())
         );
     }
@@ -508,7 +509,14 @@ mod tests {
     fn burn_rate_nan_yields_none() {
         let resets = ts(2026, 5, 26, 12);
         let now = resets - chrono::Duration::hours(50);
-        assert_eq!(burn_rate_line(f64::NAN, resets, now), None);
+        assert_eq!(burn_rate_line(f64::NAN, Some(resets), now), None);
+    }
+
+    #[test]
+    fn burn_rate_none_when_resets_at_missing() {
+        // Fresh login: API returns null for resets_at; skip the projection.
+        let now = ts(2026, 5, 26, 12);
+        assert_eq!(burn_rate_line(0.5, None, now), None);
     }
 
     #[test]
@@ -525,7 +533,7 @@ mod tests {
         let usage = UsageResponse {
             five_hour: Some(Window {
                 utilization: 0.80,
-                resets_at: r,
+                resets_at: Some(r),
             }),
             seven_day: None,
             extra: BTreeMap::new(),

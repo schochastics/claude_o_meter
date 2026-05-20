@@ -21,7 +21,10 @@ const BETA: &str = "oauth-2025-04-20";
 #[derive(Debug, Clone, Deserialize)]
 pub struct Window {
     pub utilization: f64,
-    pub resets_at: DateTime<Utc>,
+    /// `None` when the API returns `null` (e.g. a window that hasn't been
+    /// activated yet — fresh login with no Claude Code usage in the session).
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -279,7 +282,7 @@ mod tests {
         UsageResponse {
             five_hour: Some(Window {
                 utilization: util,
-                resets_at,
+                resets_at: Some(resets_at),
             }),
             seven_day: None,
             extra: BTreeMap::new(),
@@ -320,6 +323,27 @@ mod tests {
     }
 
     #[test]
+    fn decodes_null_resets_at() {
+        // Regression: after `claude login` a freshly-issued response can
+        // include `"resets_at": null` for windows that haven't started yet.
+        let body = r#"{
+            "five_hour": {"utilization": 0.0, "resets_at": null},
+            "seven_day": {"utilization": 0.1, "resets_at": "2026-05-26T12:00:00Z"}
+        }"#;
+        let r: UsageResponse = serde_json::from_str(body).unwrap();
+        assert!(r.five_hour.as_ref().unwrap().resets_at.is_none());
+        assert!(r.seven_day.as_ref().unwrap().resets_at.is_some());
+    }
+
+    #[test]
+    fn decodes_missing_resets_at_field() {
+        // Defensive: the field may be omitted entirely, not just null.
+        let body = r#"{"five_hour": {"utilization": 0.5}}"#;
+        let r: UsageResponse = serde_json::from_str(body).unwrap();
+        assert!(r.five_hour.as_ref().unwrap().resets_at.is_none());
+    }
+
+    #[test]
     fn per_model_skips_malformed_extra_entries() {
         let mut r = synth(0.5);
         // Valid per-model entry.
@@ -330,10 +354,16 @@ mod tests {
                 "resets_at": "2026-05-19T17:00:00Z",
             }),
         );
-        // Malformed entry — missing resets_at; should be skipped gracefully.
+        // Valid per-model entry with null resets_at — should still parse,
+        // since the field is now optional.
+        r.extra.insert(
+            "seven_day_opus".into(),
+            serde_json::json!({"utilization": 0.10, "resets_at": null}),
+        );
+        // Malformed — utilization is a string, not a number. Skip.
         r.extra.insert(
             "seven_day_borked".into(),
-            serde_json::json!({"utilization": 0.99}),
+            serde_json::json!({"utilization": "nope"}),
         );
         // Wrong-shape entry — string instead of object; should also be skipped.
         r.extra.insert(
@@ -341,7 +371,7 @@ mod tests {
             serde_json::Value::String("nope".into()),
         );
         let per_model = r.per_model();
-        assert_eq!(per_model.len(), 1);
-        assert_eq!(per_model[0].0, "Sonnet");
+        let labels: Vec<&str> = per_model.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(labels, vec!["Opus", "Sonnet"]);
     }
 }
