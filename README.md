@@ -2,7 +2,7 @@
 
 A macOS menu bar app that shows your live Claude Code quota at a glance, plus a small history of past usage. The icon is the Claude mark, **colored half/half** — left half by your 5-hour session usage, right half by your 7-day weekly usage. Both halves shift through blue → green → orange → red as utilization climbs, so a quick glance tells you how much headroom you have.
 
-Click the icon for the full breakdown: session and weekly progress bars, per-model split, and a history submenu with the last 7 days as a stacked bar chart plus top-projects leaderboards.
+Click the icon for the full breakdown: session and weekly progress bars and a history submenu with the last 7 days as a stacked bar chart plus top-projects leaderboards.
 
 ![](example.png)
 
@@ -59,7 +59,7 @@ Each half of the icon is colored independently from `Band::from_fraction`:
 | 75–89 %     | Orange |
 | 90 %+       | Red    |
 
-The same palette is used for the in-menu Session, Weekly, and per-model bars.
+The same palette is used for the in-menu Session and Weekly bars.
 
 ## Token expiry
 

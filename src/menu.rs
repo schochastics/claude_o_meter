@@ -71,27 +71,6 @@ pub fn build_menu(state: &AppState) -> MenuIds {
                 }
             }
 
-            let per_model = usage.per_model();
-            if !per_model.is_empty() {
-                let _ = menu.append(&PredefinedMenuItem::separator());
-                let _ = menu.append(&MenuItem::new("Weekly by model", false, None));
-                for (label, w) in per_model {
-                    let pct = (w.utilization * 100.0).round() as i64;
-                    let bar = render_solid_bar_rgba(
-                        w.utilization,
-                        Band::from_fraction(w.utilization).rgb(),
-                        &theme,
-                    );
-                    let row = IconMenuItem::new(
-                        format!("{label}  {pct}%"),
-                        false,
-                        Some(bar_icon(bar)),
-                        None,
-                    );
-                    let _ = menu.append(&row);
-                }
-            }
-
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&MenuItem::new(
                 format!(
