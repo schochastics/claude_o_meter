@@ -12,11 +12,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
-use tokio::sync::Notify;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "macos")]
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+use tokio::sync::Notify;
 use tokio::sync::mpsc as tokio_mpsc;
 use tray_icon::menu::{MenuEvent, MenuId};
 use tray_icon::{TrayIcon, TrayIconBuilder};
