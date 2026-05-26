@@ -14,6 +14,7 @@ use tray_icon::menu::{
 pub struct MenuIds {
     pub menu: Menu,
     pub refresh: MenuItem,
+    pub purge_history: MenuItem,
     pub launch_at_login: CheckMenuItem,
     pub quit: MenuItem,
 }
@@ -106,9 +107,21 @@ pub fn build_menu(state: &AppState) -> MenuIds {
 
     let _ = menu.append(&PredefinedMenuItem::separator());
     let refresh = MenuItem::new("Refresh now", true, None);
+    let tombstones = state
+        .history
+        .as_ref()
+        .map(|h| h.tombstoned_count())
+        .unwrap_or(0);
+    let purge_label = if tombstones > 0 {
+        format!("Purge removed sessions ({tombstones})")
+    } else {
+        "Purge removed sessions".to_string()
+    };
+    let purge_history = MenuItem::new(purge_label, tombstones > 0, None);
     let launch_at_login = CheckMenuItem::new("Launch at Login", true, state.launch_at_login, None);
     let quit = MenuItem::new("Quit Claude-O-Meter", true, None);
     let _ = menu.append(&refresh);
+    let _ = menu.append(&purge_history);
     let _ = menu.append(&launch_at_login);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
@@ -116,6 +129,7 @@ pub fn build_menu(state: &AppState) -> MenuIds {
     MenuIds {
         menu,
         refresh,
+        purge_history,
         launch_at_login,
         quit,
     }

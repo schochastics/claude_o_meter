@@ -46,6 +46,12 @@ struct FileEntry {
     mtime_unix_ns: i128,
     by_day: BTreeMap<NaiveDate, Totals>,
     by_project: BTreeMap<String, ProjectTotals>,
+    /// True when the source .jsonl is no longer on disk (Claude Code's
+    /// 30-day retention sweep removed it). We keep the rolled-up totals
+    /// so "all-time" aggregates survive transcript deletion. Purged
+    /// explicitly via `purge_tombstoned`.
+    #[serde(default)]
+    tombstoned: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -77,9 +83,11 @@ impl Aggregates {
         Ok(())
     }
 
-    /// Walk `projects_dir`, reparse changed files, drop entries for files
-    /// that no longer exist, rebuild rollups. Returns `true` if anything
-    /// changed.
+    /// Walk `projects_dir`, reparse changed files, tombstone entries for
+    /// files that no longer exist, rebuild rollups. Returns `true` if
+    /// anything changed. Tombstoned entries keep contributing to the
+    /// rollups so the "all-time" total survives Claude Code's transcript
+    /// retention sweep; call `purge_tombstoned` to forget them.
     pub fn refresh(&mut self, projects_dir: &Path) -> Result<bool> {
         if !projects_dir.exists() {
             return Ok(false);
@@ -90,10 +98,12 @@ impl Aggregates {
         for entry in walk_jsonl(projects_dir) {
             seen.insert(entry.clone());
             let mtime = mtime_ns(&entry);
+            // A tombstoned-but-now-back-on-disk file is treated as stale so
+            // we re-parse and clear the tombstone in one step.
             let stale = self
                 .file_totals
                 .get(&entry)
-                .map(|fe| fe.mtime_unix_ns != mtime)
+                .map(|fe| fe.mtime_unix_ns != mtime || fe.tombstoned)
                 .unwrap_or(true);
             if !stale {
                 continue;
@@ -109,26 +119,46 @@ impl Aggregates {
             }
         }
 
-        // Drop entries for files that have disappeared.
-        let stale_keys: Vec<PathBuf> = self
-            .file_totals
-            .keys()
-            .filter(|k| !seen.contains(*k))
-            .cloned()
-            .collect();
-        if !stale_keys.is_empty() {
-            changed = true;
-            for k in stale_keys {
-                self.file_totals.remove(&k);
+        // Mark entries whose source file has disappeared. Don't drop them:
+        // their totals remain in the rollups so all-time history persists
+        // even after Claude Code prunes the transcript.
+        for (k, fe) in self.file_totals.iter_mut() {
+            if !seen.contains(k) && !fe.tombstoned {
+                fe.tombstoned = true;
+                changed = true;
             }
         }
 
         if changed {
             self.rebuild_rollups();
-            self.scanned_files = self.file_totals.len();
+            self.scanned_files = self
+                .file_totals
+                .values()
+                .filter(|fe| !fe.tombstoned)
+                .count();
             self.last_scanned_at = Some(Utc::now());
         }
         Ok(changed)
+    }
+
+    /// Number of cached files whose source transcript has been deleted
+    /// from disk. Their token totals still count toward the rollups
+    /// until `purge_tombstoned` runs.
+    pub fn tombstoned_count(&self) -> usize {
+        self.file_totals.values().filter(|fe| fe.tombstoned).count()
+    }
+
+    /// Drop tombstoned entries and refresh the rollups. Returns the
+    /// number of entries removed.
+    pub fn purge_tombstoned(&mut self) -> usize {
+        let before = self.file_totals.len();
+        self.file_totals.retain(|_, fe| !fe.tombstoned);
+        let removed = before - self.file_totals.len();
+        if removed > 0 {
+            self.rebuild_rollups();
+            self.scanned_files = self.file_totals.len();
+        }
+        removed
     }
 
     fn rebuild_rollups(&mut self) {
@@ -335,6 +365,7 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
         mtime_unix_ns: mtime,
         by_day,
         by_project,
+        tombstoned: false,
     })
 }
 
@@ -441,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_files_are_dropped() {
+    fn removed_files_are_tombstoned_not_dropped() {
         let td = TempDir::new().unwrap();
         let f1 = write_jsonl(
             td.path(),
@@ -460,12 +491,78 @@ mod tests {
         let mut agg = Aggregates::default();
         agg.refresh(td.path()).unwrap();
         assert_eq!(agg.scanned_files, 2);
+        assert_eq!(agg.tombstoned_count(), 0);
 
+        // Simulate Claude Code's retention sweep deleting the transcript.
         fs::remove_file(&f1).unwrap();
         agg.refresh(td.path()).unwrap();
+        // Live count drops, but tombstoned totals are preserved.
         assert_eq!(agg.scanned_files, 1);
+        assert_eq!(agg.tombstoned_count(), 1);
+        assert!(agg.by_project.contains_key("/x"));
+        assert!(agg.by_project.contains_key("/y"));
+        assert_eq!(agg.by_project.get("/x").unwrap().total, 10);
+    }
+
+    #[test]
+    fn purge_tombstoned_drops_only_dead_entries() {
+        let td = TempDir::new().unwrap();
+        let f1 = write_jsonl(
+            td.path(),
+            "a.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/x","message":{"usage":{"input_tokens":10}}}"#,
+            ],
+        );
+        write_jsonl(
+            td.path(),
+            "b.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/y","message":{"usage":{"input_tokens":20}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        fs::remove_file(&f1).unwrap();
+        agg.refresh(td.path()).unwrap();
+
+        let purged = agg.purge_tombstoned();
+        assert_eq!(purged, 1);
+        assert_eq!(agg.tombstoned_count(), 0);
         assert!(!agg.by_project.contains_key("/x"));
         assert!(agg.by_project.contains_key("/y"));
+        assert_eq!(agg.scanned_files, 1);
+    }
+
+    #[test]
+    fn re_appearing_file_clears_tombstone() {
+        let td = TempDir::new().unwrap();
+        let f1 = write_jsonl(
+            td.path(),
+            "a.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/x","message":{"usage":{"input_tokens":10}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        fs::remove_file(&f1).unwrap();
+        agg.refresh(td.path()).unwrap();
+        assert_eq!(agg.tombstoned_count(), 1);
+
+        // Same path written back with different contents: tombstone clears,
+        // totals reflect the new content (not the old plus new).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_jsonl(
+            td.path(),
+            "a.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-05-20T08:00:00Z","cwd":"/x","message":{"usage":{"input_tokens":500}}}"#,
+            ],
+        );
+        agg.refresh(td.path()).unwrap();
+        assert_eq!(agg.tombstoned_count(), 0);
+        assert_eq!(agg.by_project.get("/x").unwrap().total, 500);
     }
 
     #[test]

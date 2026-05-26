@@ -9,8 +9,10 @@ use claude_o_meter::poller::{self, PollEvent};
 use claude_o_meter::settings::Settings;
 use directories::{BaseDirs, ProjectDirs};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "macos")]
@@ -87,11 +89,13 @@ fn main() -> anyhow::Result<()> {
         })?;
 
     let poller_handle = poller::spawn(&handle, tokio_tx, settings.refresh_secs);
-    spawn_history_loop(&handle, history_tx);
+    let purge_history_now = Arc::new(Notify::new());
+    spawn_history_loop(&handle, history_tx, purge_history_now.clone());
     drop(forward_tx);
 
     let initial = build_menu(&state);
     let mut refresh_id = initial.refresh.id().clone();
+    let mut purge_id = initial.purge_history.id().clone();
     let mut login_id = initial.launch_at_login.id().clone();
     let mut quit_id = initial.quit.id().clone();
 
@@ -126,7 +130,14 @@ fn main() -> anyhow::Result<()> {
                         state.data = DataState::Error(msg);
                     }
                 }
-                rebuild_menu(&state, &tray, &mut refresh_id, &mut login_id, &mut quit_id);
+                rebuild_menu(
+                    &state,
+                    &tray,
+                    &mut refresh_id,
+                    &mut purge_id,
+                    &mut login_id,
+                    &mut quit_id,
+                );
                 let (left, right) = bands_for(&state);
                 tray.set_icon(Some(icon_for_split(left, right))).ok();
                 tray.set_tooltip(Some(title_for(&state))).ok();
@@ -134,7 +145,14 @@ fn main() -> anyhow::Result<()> {
             }
             Event::UserEvent(UserEvent::HistoryTick(agg)) => {
                 state.history = Some(agg);
-                rebuild_menu(&state, &tray, &mut refresh_id, &mut login_id, &mut quit_id);
+                rebuild_menu(
+                    &state,
+                    &tray,
+                    &mut refresh_id,
+                    &mut purge_id,
+                    &mut login_id,
+                    &mut quit_id,
+                );
             }
             _ => {}
         }
@@ -142,6 +160,8 @@ fn main() -> anyhow::Result<()> {
         while let Ok(menu_event) = menu_events.try_recv() {
             if menu_event.id == refresh_id {
                 poller_handle.refresh_now.notify_one();
+            } else if menu_event.id == purge_id {
+                purge_history_now.notify_one();
             } else if menu_event.id == login_id {
                 let want = !state.launch_at_login;
                 match launch_at_login::set_enabled(want) {
@@ -152,7 +172,14 @@ fn main() -> anyhow::Result<()> {
                         tracing::error!(error = %e, "launch-at-login toggle failed");
                     }
                 }
-                rebuild_menu(&state, &tray, &mut refresh_id, &mut login_id, &mut quit_id);
+                rebuild_menu(
+                    &state,
+                    &tray,
+                    &mut refresh_id,
+                    &mut purge_id,
+                    &mut login_id,
+                    &mut quit_id,
+                );
             } else if menu_event.id == quit_id {
                 let _ = settings.save();
                 *control_flow = ControlFlow::Exit;
@@ -165,11 +192,13 @@ fn rebuild_menu(
     state: &AppState,
     tray: &TrayIcon,
     refresh_id: &mut MenuId,
+    purge_id: &mut MenuId,
     login_id: &mut MenuId,
     quit_id: &mut MenuId,
 ) {
     let rebuilt = build_menu(state);
     *refresh_id = rebuilt.refresh.id().clone();
+    *purge_id = rebuilt.purge_history.id().clone();
     *login_id = rebuilt.launch_at_login.id().clone();
     *quit_id = rebuilt.quit.id().clone();
     tray.set_menu(Some(Box::new(rebuilt.menu)));
@@ -187,6 +216,7 @@ fn history_cache_path() -> Option<PathBuf> {
 fn spawn_history_loop(
     runtime: &tokio::runtime::Handle,
     tx: tokio_mpsc::UnboundedSender<Aggregates>,
+    purge_now: Arc<Notify>,
 ) {
     let Some(proj_dir) = projects_dir() else {
         tracing::warn!("no home directory; history disabled");
@@ -242,7 +272,38 @@ fn spawn_history_loop(
                     Aggregates::default()
                 }
             };
-            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5 * 60)) => {}
+                _ = purge_now.notified() => {
+                    let cache = cache_path_owned.clone();
+                    let mut working = agg;
+                    let result = tokio::task::spawn_blocking(move || {
+                        let removed = working.purge_tombstoned();
+                        if removed > 0
+                            && let Some(p) = cache.as_ref()
+                            && let Err(e) = working.save(p)
+                        {
+                            tracing::warn!(error = %e, "history save after purge failed");
+                        }
+                        (removed, working)
+                    })
+                    .await;
+                    agg = match result {
+                        Ok((removed, updated)) => {
+                            tracing::info!(removed, "purged tombstoned history entries");
+                            if removed > 0 && tx.send(updated.clone()).is_err() {
+                                break;
+                            }
+                            updated
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "history purge task panicked");
+                            Aggregates::default()
+                        }
+                    };
+                }
+            }
         }
     });
 }
