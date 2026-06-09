@@ -82,9 +82,20 @@ Persisted to `~/Library/Application Support/com.cynkra.claude-o-meter/settings.j
   "idle_refresh_secs": 1200,
   "notify_session": true,
   "notify_weekly": true,
-  "thresholds": [0.75, 0.9, 0.95]
+  "thresholds": [0.75, 0.9, 0.95],
+  "notify_spike": true,
+  "notify_spike_weekly": false,
+  "spike_threshold_per_min": 0.02
 }
 ```
+
+`thresholds` fire when usage crosses absolute *levels*. `notify_spike` is a
+separate early-warning for runaways: it fires (and stamps a red "!" badge on the
+tray icon) when session usage *climbs* faster than `spike_threshold_per_min`
+(fraction of quota per minute — `0.02` ≈ 2%/min, on pace to burn the whole 5h
+session in ~50 min). Lower it to be more sensitive; raise it if you routinely run
+heavy parallel agents. `notify_spike_weekly` extends spike detection to the 7-day
+window (off by default — it's too slow-moving for velocity to be useful).
 
 Edit and restart the app to apply.
 

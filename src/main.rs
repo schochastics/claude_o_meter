@@ -1,10 +1,10 @@
 use chrono::Utc;
 use claude_o_meter::app_state::{AppState, DataState};
 use claude_o_meter::history::Aggregates;
-use claude_o_meter::icons::icon_for_split;
+use claude_o_meter::icons::{icon_for_split, icon_for_split_badged};
 use claude_o_meter::launch_at_login;
 use claude_o_meter::menu::{bands_for, build_menu, title_for};
-use claude_o_meter::notifications::{ThresholdTracker, dispatch};
+use claude_o_meter::notifications::{SpikeTracker, ThresholdTracker, dispatch};
 use claude_o_meter::poller::{self, PollEvent};
 use claude_o_meter::settings::Settings;
 use directories::{BaseDirs, ProjectDirs};
@@ -42,6 +42,10 @@ fn main() -> anyhow::Result<()> {
 
     let settings = Settings::load();
     let mut tracker = ThresholdTracker::new(settings.thresholds.clone());
+    let mut spike = SpikeTracker::new(
+        settings.spike_threshold_per_min,
+        settings.notify_spike_weekly,
+    );
     let mut state = AppState::new(launch_at_login::is_enabled());
 
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -118,9 +122,15 @@ fn main() -> anyhow::Result<()> {
                         for n in tracker.observe(&usage) {
                             dispatch(&n);
                         }
+                        let now = Utc::now();
+                        if settings.notify_spike {
+                            for n in spike.observe(&usage, now) {
+                                dispatch(&n);
+                            }
+                        }
                         state.data = DataState::Ok {
                             usage,
-                            fetched_at: Utc::now(),
+                            fetched_at: now,
                         };
                     }
                     PollEvent::AuthRequired => {
@@ -139,7 +149,9 @@ fn main() -> anyhow::Result<()> {
                     &mut quit_id,
                 );
                 let (left, right) = bands_for(&state);
-                tray.set_icon(Some(icon_for_split(left, right))).ok();
+                let spiking = matches!(state.data, DataState::Ok { .. }) && spike.session_spiking();
+                tray.set_icon(Some(icon_for_split_badged(left, right, spiking)))
+                    .ok();
                 tray.set_tooltip(Some(title_for(&state))).ok();
                 tray.set_title(None::<&str>);
             }
