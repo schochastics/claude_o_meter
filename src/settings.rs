@@ -12,6 +12,25 @@ pub struct Settings {
     pub notify_session: bool,
     pub notify_weekly: bool,
     pub thresholds: Vec<f64>,
+    /// Warn when session usage climbs abnormally fast (a runaway / costly loop).
+    #[serde(default = "default_notify_spike")]
+    pub notify_spike: bool,
+    /// Also apply spike detection to the 7-day window (off by default — the
+    /// weekly window is too slow-moving for velocity to be meaningful).
+    #[serde(default)]
+    pub notify_spike_weekly: bool,
+    /// Spike threshold as a fraction of quota per minute. Default 0.02 (2%/min)
+    /// is ~6× the fully-pegged sustained burn of the 5h session window.
+    #[serde(default = "default_spike_threshold")]
+    pub spike_threshold_per_min: f64,
+}
+
+fn default_notify_spike() -> bool {
+    true
+}
+
+fn default_spike_threshold() -> f64 {
+    0.02
 }
 
 impl Default for Settings {
@@ -22,6 +41,9 @@ impl Default for Settings {
             notify_session: true,
             notify_weekly: true,
             thresholds: vec![0.75, 0.90, 0.95],
+            notify_spike: default_notify_spike(),
+            notify_spike_weekly: false,
+            spike_threshold_per_min: default_spike_threshold(),
         }
     }
 }
@@ -90,5 +112,24 @@ mod tests {
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(s.refresh_secs, back.refresh_secs);
         assert_eq!(s.thresholds, back.thresholds);
+        assert_eq!(s.notify_spike, back.notify_spike);
+        assert_eq!(s.notify_spike_weekly, back.notify_spike_weekly);
+        assert_eq!(s.spike_threshold_per_min, back.spike_threshold_per_min);
+    }
+
+    #[test]
+    fn missing_spike_keys_deserialize_to_defaults() {
+        // A settings.json written before the spike feature existed.
+        let json = r#"{
+            "refresh_secs": 420,
+            "idle_refresh_secs": 1200,
+            "notify_session": true,
+            "notify_weekly": true,
+            "thresholds": [0.75, 0.9, 0.95]
+        }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.notify_spike);
+        assert!(!s.notify_spike_weekly);
+        assert_eq!(s.spike_threshold_per_min, 0.02);
     }
 }
