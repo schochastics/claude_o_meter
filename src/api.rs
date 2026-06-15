@@ -11,12 +11,52 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
 pub const BASE_URL: &str = "https://api.anthropic.com";
 const PATH: &str = "/api/oauth/usage";
 const BETA: &str = "oauth-2025-04-20";
+
+/// Above this, a utilization value can only be a 0..=100 percentage — no
+/// fraction-scale window legitimately reports >150% of quota.
+const PERCENTAGE_THRESHOLD: f64 = 1.5;
+
+/// Sticky detector for the API's utilization scale.
+///
+/// `/api/oauth/usage` reports utilization as either a 0..=1 fraction or a
+/// 0..=100 percentage depending on the account/API version. A *single* low
+/// reading is ambiguous — `2.0` could mean 2% (percentage) or 200% (fraction).
+/// Deciding per-response (the old heuristic) makes the displayed number flip
+/// non-monotonically as true usage crosses 1.5: e.g. 1.0 → shown as 100%,
+/// then 2.0 → shown as 2%.
+///
+/// The scale is a property of the account, not of an individual reading, so we
+/// latch it: the first time any window exceeds [`PERCENTAGE_THRESHOLD`] we lock
+/// into percentage mode and divide *every* subsequent reading by 100. The latch
+/// is shared (cheap to clone) so one detector spans all polls, and its state is
+/// persisted so a restart doesn't reopen the ambiguity window.
+#[derive(Debug, Clone, Default)]
+pub struct ScaleLatch(Arc<AtomicBool>);
+
+impl ScaleLatch {
+    /// Seed the latch — pass `true` to start already locked into percentage
+    /// mode (e.g. restored from persisted settings).
+    pub fn new(percentage: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(percentage)))
+    }
+
+    /// Whether we've decided the API reports percentages (0..=100).
+    pub fn is_percentage(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn latch_percentage(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Window {
@@ -38,17 +78,30 @@ pub struct UsageResponse {
 }
 
 impl UsageResponse {
-    /// Detect percentage-vs-fraction scale and normalize to fraction in place.
+    /// Normalize utilization to a 0..=1 fraction in place, using `latch` to
+    /// remember the API's scale across calls.
     ///
-    /// The `/api/oauth/usage` endpoint reports utilization as either a 0..=1
-    /// fraction or a 0..=100 percentage depending on the account. If any
-    /// utilization in the response exceeds 1.5, we treat the whole response
-    /// as percentage and divide every utilization by 100. Matches the
-    /// JackBhanded/claude-meter heuristic.
-    pub(crate) fn normalize_scale(&mut self) {
-        if self.max_utilization() <= 1.5 {
-            return;
+    /// While the scale is undecided, a reading whose max is within the
+    /// ambiguous `[0, 1.5]` band is assumed to already be a fraction and left
+    /// alone. The first reading that exceeds [`PERCENTAGE_THRESHOLD`] proves the
+    /// API is on the percentage scale: we latch that decision and, from then on,
+    /// divide *every* reading by 100 — including later low readings that would
+    /// otherwise be misread as near-full fractions. See [`ScaleLatch`].
+    pub(crate) fn normalize_scale(&mut self, latch: &ScaleLatch) {
+        if !latch.is_percentage() {
+            if self.max_utilization() > PERCENTAGE_THRESHOLD {
+                latch.latch_percentage();
+            } else {
+                // Still ambiguous (or NaN) — treat as an already-fraction value.
+                return;
+            }
         }
+        self.scale_down_by_100();
+    }
+
+    /// Divide every utilization (top-level windows and per-model `extra`
+    /// entries) by 100, converting a percentage reading to a fraction.
+    fn scale_down_by_100(&mut self) {
         if let Some(w) = self.five_hour.as_mut() {
             w.utilization /= 100.0;
         }
@@ -147,6 +200,7 @@ pub struct ApiClient {
     http: reqwest::Client,
     token: String,
     base_url: String,
+    scale: ScaleLatch,
 }
 
 impl ApiClient {
@@ -163,7 +217,15 @@ impl ApiClient {
             http,
             token,
             base_url,
+            scale: ScaleLatch::default(),
         })
+    }
+
+    /// Share a [`ScaleLatch`] across clients so scale detection sticks between
+    /// polls. Without this each client starts fresh in the ambiguous state.
+    pub fn with_scale_latch(mut self, scale: ScaleLatch) -> Self {
+        self.scale = scale;
+        self
     }
 
     pub async fn fetch(&self) -> Result<UsageResponse, FetchError> {
@@ -180,7 +242,7 @@ impl ApiClient {
         if status.is_success() {
             let bytes = resp.bytes().await?;
             let mut parsed: UsageResponse = serde_json::from_slice(&bytes)?;
-            parsed.normalize_scale();
+            parsed.normalize_scale(&self.scale);
             return Ok(parsed);
         }
 
@@ -256,7 +318,7 @@ mod tests {
     fn normalizes_percentage_scale() {
         let body = fixture("usage_percentage.json");
         let mut r: UsageResponse = serde_json::from_str(&body).unwrap();
-        r.normalize_scale();
+        r.normalize_scale(&ScaleLatch::default());
         assert!(close(r.five_hour.as_ref().unwrap().utilization, 0.21));
         assert!(close(r.seven_day.as_ref().unwrap().utilization, 0.07));
         let per_model = r.per_model();
@@ -272,7 +334,7 @@ mod tests {
         let mut r: UsageResponse = serde_json::from_str(&body).unwrap();
         let before_session = r.five_hour.as_ref().unwrap().utilization;
         let before_weekly = r.seven_day.as_ref().unwrap().utilization;
-        r.normalize_scale();
+        r.normalize_scale(&ScaleLatch::default());
         assert_eq!(r.five_hour.unwrap().utilization, before_session);
         assert_eq!(r.seven_day.unwrap().utilization, before_weekly);
     }
@@ -292,14 +354,14 @@ mod tests {
     #[test]
     fn boundary_at_1_5_stays_fraction() {
         let mut r = synth(1.5);
-        r.normalize_scale();
+        r.normalize_scale(&ScaleLatch::default());
         assert_eq!(r.five_hour.unwrap().utilization, 1.5);
     }
 
     #[test]
     fn boundary_above_1_5_is_percentage() {
         let mut r = synth(1.51);
-        r.normalize_scale();
+        r.normalize_scale(&ScaleLatch::default());
         assert!(close(r.five_hour.unwrap().utilization, 0.0151));
     }
 
@@ -307,7 +369,7 @@ mod tests {
     fn normalizes_extra_per_model_fields_too() {
         let body = fixture("usage_percentage.json");
         let mut r: UsageResponse = serde_json::from_str(&body).unwrap();
-        r.normalize_scale();
+        r.normalize_scale(&ScaleLatch::default());
         let sonnet_raw = r.extra.get("seven_day_sonnet").unwrap();
         let u = sonnet_raw.get("utilization").unwrap().as_f64().unwrap();
         assert!(close(u, 0.04));
@@ -316,10 +378,42 @@ mod tests {
     #[test]
     fn nan_utilization_is_left_untouched() {
         // NaN > 1.5 is false, so normalize_scale leaves the response alone
-        // rather than producing NaN/0.0 from arithmetic on NaN.
+        // rather than producing NaN/0.0 from arithmetic on NaN — and does not
+        // latch percentage mode off a garbage reading.
+        let latch = ScaleLatch::default();
         let mut r = synth(f64::NAN);
-        r.normalize_scale();
+        r.normalize_scale(&latch);
         assert!(r.five_hour.unwrap().utilization.is_nan());
+        assert!(!latch.is_percentage(), "NaN must not latch percentage mode");
+    }
+
+    #[test]
+    fn latch_makes_scale_detection_sticky() {
+        // Regression for the threshold flip-flop: a high reading latches
+        // percentage mode, and a later LOW reading (max <= 1.5) is still
+        // divided by 100 instead of being misread as a near-full fraction.
+        let latch = ScaleLatch::default();
+
+        // First poll: 2.0 (= 2%) exceeds the threshold, so we latch.
+        let mut high = synth(2.0);
+        high.normalize_scale(&latch);
+        assert!(latch.is_percentage());
+        assert!(close(high.five_hour.unwrap().utilization, 0.02));
+
+        // Second poll: 1.0 (= 1%). Without the latch this was shown as 100%.
+        let mut low = synth(1.0);
+        low.normalize_scale(&latch);
+        assert!(close(low.five_hour.unwrap().utilization, 0.01));
+    }
+
+    #[test]
+    fn preseeded_latch_normalizes_first_low_reading() {
+        // A latch restored from persisted settings treats even the very first
+        // low reading as a percentage — no ambiguity window after restart.
+        let latch = ScaleLatch::new(true);
+        let mut r = synth(1.0);
+        r.normalize_scale(&latch);
+        assert!(close(r.five_hour.unwrap().utilization, 0.01));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Background polling task: read credentials, call the API, dispatch events.
 
-use crate::api::{ApiClient, FetchError, UsageResponse};
+use crate::api::{ApiClient, FetchError, ScaleLatch, UsageResponse};
 use crate::credentials::{self, CredError};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,12 +22,19 @@ pub fn spawn(
     runtime: &tokio::runtime::Handle,
     tx: mpsc::UnboundedSender<PollEvent>,
     refresh_secs: u64,
+    scale: ScaleLatch,
 ) -> PollerHandle {
     let refresh_now = Arc::new(Notify::new());
     let refresh_now_task = refresh_now.clone();
 
     runtime.spawn(async move {
-        run(tx, refresh_now_task, Duration::from_secs(refresh_secs)).await;
+        run(
+            tx,
+            refresh_now_task,
+            Duration::from_secs(refresh_secs),
+            scale,
+        )
+        .await;
     });
 
     PollerHandle { refresh_now }
@@ -37,6 +44,7 @@ async fn run(
     tx: mpsc::UnboundedSender<PollEvent>,
     refresh_now: Arc<Notify>,
     base_interval: Duration,
+    scale: ScaleLatch,
 ) {
     const MIN_DELAY: Duration = Duration::from_secs(60);
     const MAX_DELAY: Duration = Duration::from_secs(30 * 60);
@@ -53,7 +61,7 @@ async fn run(
             }
         }
 
-        let outcome = poll_once().await;
+        let outcome = poll_once(&scale).await;
         match outcome {
             Ok(usage) => {
                 consecutive_429 = 0;
@@ -96,7 +104,7 @@ enum PollError {
     Transient(String),
 }
 
-async fn poll_once() -> Result<UsageResponse, PollError> {
+async fn poll_once(scale: &ScaleLatch) -> Result<UsageResponse, PollError> {
     let creds = credentials::read_credentials().map_err(|e| match e {
         CredError::NotFound | CredError::AccessDenied => PollError::AuthRequired,
         other => PollError::Transient(other.to_string()),
@@ -104,11 +112,13 @@ async fn poll_once() -> Result<UsageResponse, PollError> {
     if creds.is_expired(chrono::Utc::now()) {
         return Err(PollError::AuthRequired);
     }
-    let client = ApiClient::new(creds.access_token).map_err(|e| match e {
-        FetchError::Unauthorized => PollError::AuthRequired,
-        FetchError::RateLimited { retry_after } => PollError::RateLimited { retry_after },
-        other => PollError::Transient(other.to_string()),
-    })?;
+    let client = ApiClient::new(creds.access_token)
+        .map_err(|e| match e {
+            FetchError::Unauthorized => PollError::AuthRequired,
+            FetchError::RateLimited { retry_after } => PollError::RateLimited { retry_after },
+            other => PollError::Transient(other.to_string()),
+        })?
+        .with_scale_latch(scale.clone());
     client.fetch().await.map_err(|e| match e {
         FetchError::Unauthorized => PollError::AuthRequired,
         FetchError::RateLimited { retry_after } => PollError::RateLimited { retry_after },

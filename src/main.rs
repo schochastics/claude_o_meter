@@ -1,4 +1,5 @@
 use chrono::Utc;
+use claude_o_meter::api::ScaleLatch;
 use claude_o_meter::app_state::{AppState, DataState};
 use claude_o_meter::history::Aggregates;
 use claude_o_meter::icons::{icon_for_split, icon_for_split_badged};
@@ -40,7 +41,8 @@ fn main() -> anyhow::Result<()> {
         tracing::debug!(error = %e, "set_application failed (run from .app bundle for notifications)");
     }
 
-    let settings = Settings::load();
+    let mut settings = Settings::load();
+    let scale = ScaleLatch::new(settings.percentage_scale);
     let mut tracker = ThresholdTracker::new(settings.thresholds.clone());
     let mut spike = SpikeTracker::new(
         settings.spike_threshold_per_min,
@@ -92,7 +94,7 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
 
-    let poller_handle = poller::spawn(&handle, tokio_tx, settings.refresh_secs);
+    let poller_handle = poller::spawn(&handle, tokio_tx, settings.refresh_secs, scale.clone());
     let purge_history_now = Arc::new(Notify::new());
     spawn_history_loop(&handle, history_tx, purge_history_now.clone());
     drop(forward_tx);
@@ -132,6 +134,14 @@ fn main() -> anyhow::Result<()> {
                             usage,
                             fetched_at: now,
                         };
+                        // Persist the scale decision the first time it latches,
+                        // so a restart doesn't reopen the ambiguity window.
+                        if scale.is_percentage() && !settings.percentage_scale {
+                            settings.percentage_scale = true;
+                            if let Err(e) = settings.save() {
+                                tracing::warn!(error = %e, "failed to persist scale latch");
+                            }
+                        }
                     }
                     PollEvent::AuthRequired => {
                         state.data = DataState::AuthRequired;

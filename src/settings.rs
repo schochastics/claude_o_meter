@@ -23,6 +23,12 @@ pub struct Settings {
     /// is ~6× the fully-pegged sustained burn of the 5h session window.
     #[serde(default = "default_spike_threshold")]
     pub spike_threshold_per_min: f64,
+    /// Latched result of the usage API's percentage-vs-fraction scale
+    /// detection (see `api::ScaleLatch`). Persisted so a restart doesn't
+    /// reopen the ambiguity window and briefly misreport low usage. Once the
+    /// API has proven it reports percentages, this stays `true`.
+    #[serde(default)]
+    pub percentage_scale: bool,
 }
 
 fn default_notify_spike() -> bool {
@@ -44,6 +50,7 @@ impl Default for Settings {
             notify_spike: default_notify_spike(),
             notify_spike_weekly: false,
             spike_threshold_per_min: default_spike_threshold(),
+            percentage_scale: false,
         }
     }
 }
@@ -115,6 +122,21 @@ mod tests {
         assert_eq!(s.notify_spike, back.notify_spike);
         assert_eq!(s.notify_spike_weekly, back.notify_spike_weekly);
         assert_eq!(s.spike_threshold_per_min, back.spike_threshold_per_min);
+        assert_eq!(s.percentage_scale, back.percentage_scale);
+    }
+
+    #[test]
+    fn missing_percentage_scale_defaults_to_false() {
+        // A settings.json written before scale-latch persistence existed.
+        let json = r#"{
+            "refresh_secs": 420,
+            "idle_refresh_secs": 1200,
+            "notify_session": true,
+            "notify_weekly": true,
+            "thresholds": [0.75, 0.9, 0.95]
+        }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(!s.percentage_scale);
     }
 
     #[test]
