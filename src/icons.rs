@@ -23,6 +23,7 @@ const BADGE_GLYPH: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 pub enum Band {
     Blue,
     Green,
+    Yellow,
     Orange,
     Red,
 }
@@ -30,11 +31,13 @@ pub enum Band {
 impl Band {
     /// Pick the band by utilization (0..=1+). Above 100% counts as red.
     pub fn from_fraction(f: f64) -> Self {
-        if f < 0.50 {
+        if f < 0.25 {
             Band::Blue
-        } else if f < 0.75 {
+        } else if f < 0.50 {
             Band::Green
-        } else if f < 0.90 {
+        } else if f < 0.75 {
+            Band::Yellow
+        } else if f < 0.95 {
             Band::Orange
         } else {
             Band::Red
@@ -43,10 +46,11 @@ impl Band {
 
     pub fn rgb(self) -> [u8; 3] {
         match self {
-            Band::Blue => [0x4D, 0x9D, 0xE0],
-            Band::Green => [0x3A, 0xC0, 0x6E],
-            Band::Orange => [0xF2, 0x9E, 0x4C],
-            Band::Red => [0xE6, 0x4A, 0x4A],
+            Band::Blue => [0x1D, 0x48, 0x77],
+            Band::Green => [0x1B, 0x8A, 0x5A],
+            Band::Yellow => [0xFB, 0xB0, 0x21],
+            Band::Orange => [0xF6, 0x88, 0x38],
+            Band::Red => [0xEE, 0x3E, 0x32],
         }
     }
 }
@@ -141,12 +145,14 @@ mod tests {
     #[test]
     fn band_thresholds() {
         assert_eq!(Band::from_fraction(0.0), Band::Blue);
-        assert_eq!(Band::from_fraction(0.49), Band::Blue);
-        assert_eq!(Band::from_fraction(0.50), Band::Green);
-        assert_eq!(Band::from_fraction(0.74), Band::Green);
+        assert_eq!(Band::from_fraction(0.24), Band::Blue);
+        assert_eq!(Band::from_fraction(0.25), Band::Green);
+        assert_eq!(Band::from_fraction(0.49), Band::Green);
+        assert_eq!(Band::from_fraction(0.50), Band::Yellow);
+        assert_eq!(Band::from_fraction(0.74), Band::Yellow);
         assert_eq!(Band::from_fraction(0.75), Band::Orange);
-        assert_eq!(Band::from_fraction(0.89), Band::Orange);
-        assert_eq!(Band::from_fraction(0.90), Band::Red);
+        assert_eq!(Band::from_fraction(0.94), Band::Orange);
+        assert_eq!(Band::from_fraction(0.95), Band::Red);
         assert_eq!(Band::from_fraction(1.5), Band::Red);
     }
 
