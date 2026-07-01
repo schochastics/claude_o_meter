@@ -2,7 +2,7 @@
 
 use crate::app_state::{AppState, DataState};
 use crate::bars::{CANVAS_H, CANVAS_W, Theme, render_bar_rgba, render_solid_bar_rgba};
-use crate::history::{Aggregates, short_name};
+use crate::history::{Aggregates, PromptStat, short_name};
 use crate::icons::Band;
 use crate::theme::Appearance;
 use crate::time_fmt::resets_in;
@@ -26,6 +26,7 @@ const COLOR_CACHE_CREATION: [u8; 3] = [0xB5, 0x7E, 0xDC]; // purple
 const COLOR_CACHE_READ: [u8; 3] = [0x3A, 0xC0, 0x6E]; // green
 
 const TOP_PROJECTS_N: usize = 8;
+const TOP_PROMPTS_N: usize = 3;
 const TOKEN_COL_WIDTH: usize = 6;
 const FIG_SPACE: char = '\u{2007}';
 
@@ -99,6 +100,18 @@ pub fn build_menu(state: &AppState) -> MenuIds {
         ));
         let _ = menu.append(&top_projects_submenu(
             "Top projects (all-time)",
+            history,
+            None,
+            &theme,
+        ));
+        let _ = menu.append(&top_prompts_submenu(
+            "Top prompts (7d)",
+            history,
+            Some(today - chrono::Duration::days(6)),
+            &theme,
+        ));
+        let _ = menu.append(&top_prompts_submenu(
+            "Top prompts (all-time)",
             history,
             None,
             &theme,
@@ -221,6 +234,35 @@ fn top_projects_submenu(
             "{}  {}",
             pad_left_figure(&humanize_tokens(*total), TOKEN_COL_WIDTH),
             name,
+        );
+        let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
+    }
+    sub
+}
+
+/// Build a "Top prompts ▸" submenu — the highest-token prompts, each a
+/// display-only row with a proportional bar, right-aligned token count, and a
+/// truncated preview of the prompt text.
+fn top_prompts_submenu(
+    label: &str,
+    h: &Aggregates,
+    since: Option<chrono::NaiveDate>,
+    theme: &Theme,
+) -> Submenu {
+    let sub = Submenu::new(label, true);
+    let top: Vec<PromptStat> = h.top_prompts(TOP_PROMPTS_N, since);
+    if top.is_empty() {
+        let _ = sub.append(&MenuItem::new("(no data)", false, None));
+        return sub;
+    }
+    let max_total = top.first().map(|p| p.tokens).unwrap_or(0).max(1);
+    for p in &top {
+        let fraction = p.tokens as f64 / max_total as f64;
+        let bar = render_solid_bar_rgba(fraction, COLOR_OUTPUT, theme);
+        let label = format!(
+            "{}  {}",
+            pad_left_figure(&humanize_tokens(p.tokens), TOKEN_COL_WIDTH),
+            p.text,
         );
         let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
     }

@@ -41,11 +41,37 @@ pub struct ProjectTotals {
     pub last_used: Option<DateTime<Utc>>,
 }
 
+/// A single user prompt and the total tokens attributed to it (summed across
+/// the assistant messages in its turn). `text` is a whitespace-collapsed,
+/// truncated preview of the prompt for display in the menu.
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+pub struct PromptStat {
+    pub text: String,
+    pub tokens: u64,
+    pub project: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Max prompts retained per file. Generous so a global top-3 in either the
+/// 7-day or all-time window is virtually always present in some file's list.
+const PER_FILE_PROMPTS: usize = 10;
+
+/// Max prompt preview length stored in the cache, in characters.
+const PROMPT_TEXT_MAX: usize = 120;
+
+/// Bump when the parse/cache schema changes in a way that requires re-parsing
+/// existing transcripts. See `load_or_default` for the migration.
+const HISTORY_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 struct FileEntry {
     mtime_unix_ns: i128,
     by_day: BTreeMap<NaiveDate, Totals>,
     by_project: BTreeMap<String, ProjectTotals>,
+    /// This file's own top prompts by token usage, capped at
+    /// `PER_FILE_PROMPTS`. Rolled up on demand by `Aggregates::top_prompts`.
+    #[serde(default)]
+    top_prompts: Vec<PromptStat>,
     /// True when the source .jsonl is no longer on disk (Claude Code's
     /// 30-day retention sweep removed it). We keep the rolled-up totals
     /// so "all-time" aggregates survive transcript deletion. Purged
@@ -61,17 +87,39 @@ pub struct Aggregates {
     pub by_project: BTreeMap<String, ProjectTotals>,
     pub scanned_files: usize,
     pub last_scanned_at: Option<DateTime<Utc>>,
+    /// Schema version of the cached data. See `HISTORY_VERSION`.
+    #[serde(default)]
+    version: u32,
 }
 
 impl Aggregates {
     pub fn load_or_default(path: &Path) -> Self {
-        match fs::read(path) {
+        let mut agg: Aggregates = match fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "history cache malformed; starting fresh");
                 Aggregates::default()
             }),
             Err(_) => Aggregates::default(),
+        };
+        agg.migrate();
+        agg
+    }
+
+    /// Handle cache-schema upgrades. When the persisted `version` is behind
+    /// `HISTORY_VERSION`, invalidate every live entry's mtime so the next
+    /// `refresh` re-parses it and populates the newer fields (e.g. prompts).
+    /// Tombstoned entries are left as-is — their source transcript is gone, so
+    /// they keep their existing day/project totals but contribute no prompts.
+    fn migrate(&mut self) {
+        if self.version == HISTORY_VERSION {
+            return;
         }
+        for fe in self.file_totals.values_mut() {
+            if !fe.tombstoned {
+                fe.mtime_unix_ns = i128::MIN;
+            }
+        }
+        self.version = HISTORY_VERSION;
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -267,6 +315,34 @@ impl Aggregates {
         out.truncate(n);
         out
     }
+
+    /// Top prompts by token usage across all live files, optionally restricted
+    /// to prompts on or after `since` (by the prompt's local date). Returns at
+    /// most `n` entries, highest tokens first.
+    ///
+    /// Because each file only retains its own top `PER_FILE_PROMPTS`, a very
+    /// small recent prompt could in theory fall outside its file's list and be
+    /// missed by the `since` window — negligible for a global top-N, and
+    /// mirrors the per-file approximation used by `top_projects`.
+    pub fn top_prompts(&self, n: usize, since: Option<NaiveDate>) -> Vec<PromptStat> {
+        let mut out: Vec<PromptStat> = Vec::new();
+        for fe in self.file_totals.values() {
+            if fe.tombstoned {
+                continue;
+            }
+            for p in &fe.top_prompts {
+                if let Some(since_date) = since
+                    && p.timestamp.with_timezone(&Local).date_naive() < since_date
+                {
+                    continue;
+                }
+                out.push(p.clone());
+            }
+        }
+        out.sort_by_key(|p| std::cmp::Reverse(p.tokens));
+        out.truncate(n);
+        out
+    }
 }
 
 fn walk_jsonl(root: &Path) -> Vec<PathBuf> {
@@ -301,12 +377,15 @@ struct Line {
     kind: Option<String>,
     timestamp: Option<DateTime<Utc>>,
     cwd: Option<String>,
+    #[serde(default, rename = "isSidechain")]
+    is_sidechain: bool,
     message: Option<Message>,
 }
 
 #[derive(Deserialize)]
 struct Message {
     usage: Option<UsageBlock>,
+    content: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -323,6 +402,13 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
     let mut by_day: BTreeMap<NaiveDate, Totals> = BTreeMap::new();
     let mut by_project: BTreeMap<String, ProjectTotals> = BTreeMap::new();
 
+    // Prompt attribution: `current` accumulates assistant tokens for the most
+    // recent top-level user prompt; a new real prompt flushes it. Sidechain
+    // (subagent) lines are excluded from prompt ranking but still counted in
+    // the day/project totals to preserve existing behavior.
+    let mut prompts: Vec<PromptStat> = Vec::new();
+    let mut current: Option<PromptStat> = None;
+
     for line in reader.lines() {
         let Ok(line) = line else { continue };
         if line.is_empty() {
@@ -331,42 +417,116 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
         let Ok(parsed): std::result::Result<Line, _> = serde_json::from_str(&line) else {
             continue;
         };
-        if parsed.kind.as_deref() != Some("assistant") {
-            continue;
-        }
-        let Some(message) = parsed.message else {
-            continue;
-        };
-        let Some(usage) = message.usage else { continue };
-        let totals = Totals {
-            input: usage.input_tokens.unwrap_or(0),
-            output: usage.output_tokens.unwrap_or(0),
-            cache_creation: usage.cache_creation_input_tokens.unwrap_or(0),
-            cache_read: usage.cache_read_input_tokens.unwrap_or(0),
-        };
-        if totals.sum() == 0 {
-            continue;
-        }
         let ts = parsed.timestamp.unwrap_or_else(Utc::now);
-        let local_date = ts.with_timezone(&Local).date_naive();
-        by_day.entry(local_date).or_default().add(&totals);
 
-        if let Some(cwd) = parsed.cwd {
-            let pt = by_project.entry(cwd).or_default();
-            pt.total += totals.sum();
-            pt.last_used = Some(match pt.last_used {
-                Some(prev) if prev > ts => prev,
-                _ => ts,
-            });
+        match parsed.kind.as_deref() {
+            Some("assistant") => {
+                let Some(message) = parsed.message else { continue };
+                let Some(usage) = message.usage else { continue };
+                let totals = Totals {
+                    input: usage.input_tokens.unwrap_or(0),
+                    output: usage.output_tokens.unwrap_or(0),
+                    cache_creation: usage.cache_creation_input_tokens.unwrap_or(0),
+                    cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+                };
+                if totals.sum() == 0 {
+                    continue;
+                }
+                let local_date = ts.with_timezone(&Local).date_naive();
+                by_day.entry(local_date).or_default().add(&totals);
+
+                if let Some(cwd) = parsed.cwd {
+                    let pt = by_project.entry(cwd).or_default();
+                    pt.total += totals.sum();
+                    pt.last_used = Some(match pt.last_used {
+                        Some(prev) if prev > ts => prev,
+                        _ => ts,
+                    });
+                }
+
+                if !parsed.is_sidechain
+                    && let Some(cur) = current.as_mut()
+                {
+                    cur.tokens += totals.sum();
+                }
+            }
+            Some("user") => {
+                if parsed.is_sidechain {
+                    continue;
+                }
+                let Some(message) = parsed.message else { continue };
+                let Some(text) = extract_prompt_text(message.content.as_ref()) else {
+                    continue;
+                };
+                if let Some(prev) = current.take()
+                    && prev.tokens > 0
+                {
+                    prompts.push(prev);
+                }
+                current = Some(PromptStat {
+                    text,
+                    tokens: 0,
+                    project: parsed.cwd.unwrap_or_default(),
+                    timestamp: ts,
+                });
+            }
+            _ => {}
         }
     }
+    if let Some(prev) = current.take()
+        && prev.tokens > 0
+    {
+        prompts.push(prev);
+    }
+    prompts.sort_by_key(|p| std::cmp::Reverse(p.tokens));
+    prompts.truncate(PER_FILE_PROMPTS);
 
     Ok(FileEntry {
         mtime_unix_ns: mtime,
         by_day,
         by_project,
+        top_prompts: prompts,
         tombstoned: false,
     })
+}
+
+/// Extract a display preview from a user message's `content`, or `None` if this
+/// isn't a real user prompt. A `type:"user"` line that carries a `tool_result`
+/// block is a tool response, not something the user typed, so it's rejected.
+fn extract_prompt_text(content: Option<&serde_json::Value>) -> Option<String> {
+    let raw = match content? {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => {
+            let is_tool_result = |b: &serde_json::Value| {
+                b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+            };
+            if blocks.iter().any(is_tool_result) {
+                return None;
+            }
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        _ => return None,
+    };
+    let cleaned: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&cleaned, PROMPT_TEXT_MAX))
+}
+
+/// Truncate to at most `max` characters, appending an ellipsis when cut.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Just the basename of a project path, plus the parent dir if there's a
@@ -690,5 +850,174 @@ mod tests {
             short_name("/Users/a/proj", &["/Users/a/proj", "/Users/b/proj"]),
             "a/proj"
         );
+    }
+
+    #[test]
+    fn prompt_attribution_sums_assistant_tokens_per_turn() {
+        let td = TempDir::new().unwrap();
+        write_jsonl(
+            td.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"content":"cheap prompt"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:01Z","cwd":"/p","message":{"usage":{"output_tokens":30}}}"#,
+                r#"{"type":"user","timestamp":"2026-05-19T09:00:00Z","cwd":"/p","message":{"content":"expensive prompt"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T09:00:01Z","cwd":"/p","message":{"usage":{"input_tokens":100,"output_tokens":200}}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T09:00:02Z","cwd":"/p","message":{"usage":{"output_tokens":50}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        let top = agg.top_prompts(5, None);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].text, "expensive prompt");
+        assert_eq!(top[0].tokens, 100 + 200 + 50);
+        assert_eq!(top[0].project, "/p");
+        assert_eq!(top[1].text, "cheap prompt");
+        assert_eq!(top[1].tokens, 30);
+    }
+
+    #[test]
+    fn tool_result_user_lines_are_not_prompts() {
+        let td = TempDir::new().unwrap();
+        write_jsonl(
+            td.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"content":"real prompt"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:01Z","cwd":"/p","message":{"usage":{"output_tokens":10}}}"#,
+                r#"{"type":"user","timestamp":"2026-05-19T08:00:02Z","cwd":"/p","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:03Z","cwd":"/p","message":{"usage":{"output_tokens":90}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        let top = agg.top_prompts(5, None);
+        // Both assistant turns attribute to the single real prompt; the
+        // tool_result line does not start a new prompt.
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].text, "real prompt");
+        assert_eq!(top[0].tokens, 100);
+    }
+
+    #[test]
+    fn sidechain_lines_are_skipped_for_prompts() {
+        let td = TempDir::new().unwrap();
+        write_jsonl(
+            td.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"content":"top-level prompt"}}"#,
+                r#"{"type":"user","isSidechain":true,"timestamp":"2026-05-19T08:00:01Z","cwd":"/p","message":{"content":"subagent prompt"}}"#,
+                r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-05-19T08:00:02Z","cwd":"/p","message":{"usage":{"output_tokens":500}}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:03Z","cwd":"/p","message":{"usage":{"output_tokens":10}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        let top = agg.top_prompts(5, None);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].text, "top-level prompt");
+        // Sidechain assistant tokens are not attributed to the prompt...
+        assert_eq!(top[0].tokens, 10);
+        // ...but still count toward project totals (existing behavior).
+        assert_eq!(agg.by_project.get("/p").unwrap().total, 510);
+    }
+
+    #[test]
+    fn multi_block_text_and_image_prompt_is_captured() {
+        let td = TempDir::new().unwrap();
+        write_jsonl(
+            td.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"content":[{"type":"image","source":{}},{"type":"text","text":"describe this"}]}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:01Z","cwd":"/p","message":{"usage":{"output_tokens":42}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        let top = agg.top_prompts(5, None);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].text, "describe this");
+        assert_eq!(top[0].tokens, 42);
+    }
+
+    #[test]
+    fn top_prompts_respects_since_window() {
+        let td = TempDir::new().unwrap();
+        write_jsonl(
+            td.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-05-10T08:00:00Z","cwd":"/p","message":{"content":"old big prompt"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-10T08:00:01Z","cwd":"/p","message":{"usage":{"output_tokens":1000}}}"#,
+                r#"{"type":"user","timestamp":"2026-05-20T08:00:00Z","cwd":"/p","message":{"content":"recent small prompt"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-20T08:00:01Z","cwd":"/p","message":{"usage":{"output_tokens":5}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        let since = NaiveDate::from_ymd_opt(2026, 5, 15).unwrap();
+        let recent = agg.top_prompts(5, Some(since));
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text, "recent small prompt");
+        // All-time still sees both, biggest first.
+        assert_eq!(agg.top_prompts(5, None)[0].text, "old big prompt");
+    }
+
+    #[test]
+    fn per_file_prompt_list_is_capped() {
+        let td = TempDir::new().unwrap();
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..(PER_FILE_PROMPTS + 5) {
+            lines.push(format!(
+                r#"{{"type":"user","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{{"content":"prompt {i}"}}}}"#
+            ));
+            lines.push(format!(
+                r#"{{"type":"assistant","timestamp":"2026-05-19T08:00:01Z","cwd":"/p","message":{{"usage":{{"output_tokens":{}}}}}}}"#,
+                i + 1
+            ));
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        write_jsonl(td.path(), "s.jsonl", &refs);
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        let all = agg.top_prompts(1000, None);
+        assert_eq!(all.len(), PER_FILE_PROMPTS);
+        // The largest-token prompt is retained.
+        assert_eq!(all[0].tokens, (PER_FILE_PROMPTS + 5) as u64);
+    }
+
+    #[test]
+    fn version_migration_reparses_live_files_for_prompts() {
+        let td = TempDir::new().unwrap();
+        let cache = td.path().join("history.json");
+        write_jsonl(
+            td.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"content":"a prompt"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:01Z","cwd":"/p","message":{"usage":{"output_tokens":7}}}"#,
+            ],
+        );
+        // Simulate an old cache: correct day/project totals but no prompts and
+        // a stale version.
+        let mut old = Aggregates::default();
+        old.refresh(td.path()).unwrap();
+        for fe in old.file_totals.values_mut() {
+            fe.top_prompts.clear();
+        }
+        old.version = 0;
+        old.save(&cache).unwrap();
+
+        // Loading migrates (invalidates mtimes); the next refresh repopulates.
+        let mut reloaded = Aggregates::load_or_default(&cache);
+        assert!(reloaded.top_prompts(5, None).is_empty());
+        reloaded.refresh(td.path()).unwrap();
+        let top = reloaded.top_prompts(5, None);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].text, "a prompt");
+        assert_eq!(top[0].tokens, 7);
     }
 }
