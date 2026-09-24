@@ -11,7 +11,9 @@ Click the icon for the full breakdown: session and weekly progress bars and a hi
 - **Live quota indicator** in the menu bar, split left/right between session and weekly utilization.
 - **Pixel-rendered bars** in every menu row (no emoji), light/dark-mode aware.
 - **Threshold notifications** at 75 / 90 / 95% so you know before you hit the wall.
-- **Local history**: last 7 days as a stacked bar chart (input / output / cache write / cache read), plus top-projects leaderboards for the last 7 days and all-time.
+- **Per-model weekly caps** (e.g. Opus / Sonnet) as extra bars when your plan reports them.
+- **Local history**: last 7 days as a stacked bar chart (input / output / cache write / cache read) with a color key showing each type's share, the 7-day cache hit rate, plus top-projects and top-prompts leaderboards for the last 7 days and all-time.
+- **API-equivalent cost**: every day, project, prompt and the monthly projection carries an estimate of what the same tokens would cost at Claude API list prices (per model, with 5m/1h cache-write and fast-mode rates). Your subscription isn't billed this way — it's a sense of scale.
 - **Auto-update**: every 5 min in the background, no manual refresh button needed.
 - **Launch at Login** via macOS's native SMAppService.
 - **Token expiry handled gracefully**: shows `?` and a notification when your Claude Code OAuth token expires; recovers automatically on the next `claude login`.

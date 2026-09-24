@@ -6,6 +6,7 @@
 //! Incremental: only files whose mtime changed since the last scan are
 //! re-parsed. Result is persisted as JSON so restarts populate instantly.
 
+use crate::pricing::{MessageUsage, cost_micros};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,25 +21,47 @@ pub struct Totals {
     pub output: u64,
     pub cache_creation: u64,
     pub cache_read: u64,
+    /// Estimated API-equivalent cost in micro-dollars. See `pricing`.
+    #[serde(default)]
+    pub cost_micros: u64,
 }
 
 impl Totals {
+    /// Total tokens (cost is not a token count and is excluded).
     pub fn sum(&self) -> u64 {
         self.input + self.output + self.cache_creation + self.cache_read
     }
 
-    fn add(&mut self, other: &Totals) {
+    /// Share of input-side tokens served from the prompt cache:
+    /// `cache_read / (input + cache_creation + cache_read)`. `None` when
+    /// there was no input at all.
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        let input_side = self.input + self.cache_creation + self.cache_read;
+        (input_side > 0).then(|| self.cache_read as f64 / input_side as f64)
+    }
+
+    pub fn add(&mut self, other: &Totals) {
         self.input += other.input;
         self.output += other.output;
         self.cache_creation += other.cache_creation;
         self.cache_read += other.cache_read;
+        self.cost_micros += other.cost_micros;
     }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct ProjectTotals {
     pub total: u64,
+    #[serde(default)]
+    pub cost_micros: u64,
     pub last_used: Option<DateTime<Utc>>,
+}
+
+/// Tokens plus estimated cost (micro-dollars) over some window.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenCost {
+    pub tokens: u64,
+    pub cost_micros: u64,
 }
 
 /// A single user prompt and the total tokens attributed to it (summed across
@@ -48,6 +71,8 @@ pub struct ProjectTotals {
 pub struct PromptStat {
     pub text: String,
     pub tokens: u64,
+    #[serde(default)]
+    pub cost_micros: u64,
     pub project: String,
     pub timestamp: DateTime<Utc>,
 }
@@ -61,7 +86,7 @@ const PROMPT_TEXT_MAX: usize = 120;
 
 /// Bump when the parse/cache schema changes in a way that requires re-parsing
 /// existing transcripts. See `load_or_default` for the migration.
-const HISTORY_VERSION: u32 = 1;
+const HISTORY_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 struct FileEntry {
@@ -220,6 +245,7 @@ impl Aggregates {
             for (proj, pt) in &fe.by_project {
                 let agg = by_project.entry(proj.clone()).or_default();
                 agg.total += pt.total;
+                agg.cost_micros += pt.cost_micros;
                 match (agg.last_used, pt.last_used) {
                     (None, x) => agg.last_used = x,
                     (Some(a), Some(b)) if b > a => agg.last_used = Some(b),
@@ -244,13 +270,14 @@ impl Aggregates {
             .collect()
     }
 
-    /// Total tokens in the current calendar month plus a linear projection
-    /// to month-end. Returns `(current_total, projected_total)`. When no
+    /// Tokens and cost in the current calendar month plus a linear projection
+    /// to month-end. Returns `(current, projected)`. When no
     /// days have elapsed yet (impossible in practice), the projection equals
     /// the current total.
-    pub fn current_month_total_and_projection(&self, today: NaiveDate) -> (u64, u64) {
+    pub fn current_month_total_and_projection(&self, today: NaiveDate) -> (TokenCost, TokenCost) {
+        let none = (TokenCost::default(), TokenCost::default());
         let Some(month_start) = today.with_day(1) else {
-            return (0, 0);
+            return none;
         };
         let next_month_start = if today.month() == 12 {
             NaiveDate::from_ymd_opt(today.year() + 1, 1, 1)
@@ -258,60 +285,79 @@ impl Aggregates {
             NaiveDate::from_ymd_opt(today.year(), today.month() + 1, 1)
         };
         let Some(next_month_start) = next_month_start else {
-            return (0, 0);
+            return none;
         };
         let days_in_month = (next_month_start - month_start).num_days().max(1) as u64;
         let days_elapsed = ((today - month_start).num_days() + 1).max(1) as u64;
 
-        let current: u64 = self
-            .by_day
-            .range(month_start..next_month_start)
-            .map(|(_, t)| t.sum())
-            .sum();
-        let projected = current.saturating_mul(days_in_month) / days_elapsed;
+        let mut month = Totals::default();
+        for (_, t) in self.by_day.range(month_start..next_month_start) {
+            month.add(t);
+        }
+        let current = TokenCost {
+            tokens: month.sum(),
+            cost_micros: month.cost_micros,
+        };
+        let project = |n: u64| n.saturating_mul(days_in_month) / days_elapsed;
+        let projected = TokenCost {
+            tokens: project(current.tokens),
+            cost_micros: project(current.cost_micros),
+        };
         (current, projected)
     }
 
     /// Top projects by total tokens, optionally restricted to activity on
     /// or after `since`. For the windowed case we approximate per-project
     /// recent tokens as `(project's share of its file) × (recent share of
-    /// that file)` since we don't store per-day-per-project breakdowns.
-    /// Returns at most `n` entries.
-    pub fn top_projects(&self, n: usize, since: Option<NaiveDate>) -> Vec<(String, u64)> {
-        let mut acc: BTreeMap<String, u64> = BTreeMap::new();
+    /// that file)` since we don't store per-day-per-project breakdowns; cost
+    /// is apportioned the same way using the file's recent cost share.
+    /// Returns at most `n` `(path, TokenCost)` entries.
+    pub fn top_projects(&self, n: usize, since: Option<NaiveDate>) -> Vec<(String, TokenCost)> {
+        let mut acc: BTreeMap<String, TokenCost> = BTreeMap::new();
         match since {
             None => {
                 for (proj, pt) in &self.by_project {
-                    acc.insert(proj.clone(), pt.total);
+                    acc.insert(
+                        proj.clone(),
+                        TokenCost {
+                            tokens: pt.total,
+                            cost_micros: pt.cost_micros,
+                        },
+                    );
                 }
             }
             Some(since_date) => {
                 for fe in self.file_totals.values() {
-                    let file_total: u64 = fe.by_day.values().map(|t| t.sum()).sum();
-                    if file_total == 0 {
+                    let mut file = Totals::default();
+                    let mut recent = Totals::default();
+                    for (d, t) in &fe.by_day {
+                        file.add(t);
+                        if *d >= since_date {
+                            recent.add(t);
+                        }
+                    }
+                    if file.sum() == 0 || recent.sum() == 0 {
                         continue;
                     }
-                    let recent: u64 = fe
-                        .by_day
-                        .iter()
-                        .filter(|(d, _)| **d >= since_date)
-                        .map(|(_, t)| t.sum())
-                        .sum();
-                    if recent == 0 {
-                        continue;
-                    }
-                    let frac = recent as f64 / file_total as f64;
+                    let frac = recent.sum() as f64 / file.sum() as f64;
+                    let cost_frac = if file.cost_micros == 0 {
+                        0.0
+                    } else {
+                        recent.cost_micros as f64 / file.cost_micros as f64
+                    };
                     for (proj, pt) in &fe.by_project {
                         let portion = (pt.total as f64 * frac).round() as u64;
                         if portion > 0 {
-                            *acc.entry(proj.clone()).or_default() += portion;
+                            let e = acc.entry(proj.clone()).or_default();
+                            e.tokens += portion;
+                            e.cost_micros += (pt.cost_micros as f64 * cost_frac).round() as u64;
                         }
                     }
                 }
             }
         }
-        let mut out: Vec<(String, u64)> = acc.into_iter().collect();
-        out.sort_by_key(|(_, total)| std::cmp::Reverse(*total));
+        let mut out: Vec<(String, TokenCost)> = acc.into_iter().collect();
+        out.sort_by_key(|(_, u)| std::cmp::Reverse(u.tokens));
         out.truncate(n);
         out
     }
@@ -384,6 +430,7 @@ struct Line {
 
 #[derive(Deserialize)]
 struct Message {
+    model: Option<String>,
     usage: Option<UsageBlock>,
     content: Option<serde_json::Value>,
 }
@@ -394,6 +441,19 @@ struct UsageBlock {
     output_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+    cache_creation: Option<CacheCreation>,
+    server_tool_use: Option<ServerToolUse>,
+    speed: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CacheCreation {
+    ephemeral_1h_input_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ServerToolUse {
+    web_search_requests: Option<u64>,
 }
 
 fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
@@ -421,13 +481,31 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
 
         match parsed.kind.as_deref() {
             Some("assistant") => {
-                let Some(message) = parsed.message else { continue };
+                let Some(message) = parsed.message else {
+                    continue;
+                };
                 let Some(usage) = message.usage else { continue };
-                let totals = Totals {
+                let mu = MessageUsage {
                     input: usage.input_tokens.unwrap_or(0),
                     output: usage.output_tokens.unwrap_or(0),
                     cache_creation: usage.cache_creation_input_tokens.unwrap_or(0),
+                    cache_creation_1h: usage
+                        .cache_creation
+                        .and_then(|c| c.ephemeral_1h_input_tokens)
+                        .unwrap_or(0),
                     cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+                    web_search_requests: usage
+                        .server_tool_use
+                        .and_then(|s| s.web_search_requests)
+                        .unwrap_or(0),
+                    fast: usage.speed.as_deref() == Some("fast"),
+                };
+                let totals = Totals {
+                    input: mu.input,
+                    output: mu.output,
+                    cache_creation: mu.cache_creation,
+                    cache_read: mu.cache_read,
+                    cost_micros: cost_micros(message.model.as_deref().unwrap_or(""), &mu),
                 };
                 if totals.sum() == 0 {
                     continue;
@@ -438,6 +516,7 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
                 if let Some(cwd) = parsed.cwd {
                     let pt = by_project.entry(cwd).or_default();
                     pt.total += totals.sum();
+                    pt.cost_micros += totals.cost_micros;
                     pt.last_used = Some(match pt.last_used {
                         Some(prev) if prev > ts => prev,
                         _ => ts,
@@ -448,13 +527,16 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
                     && let Some(cur) = current.as_mut()
                 {
                     cur.tokens += totals.sum();
+                    cur.cost_micros += totals.cost_micros;
                 }
             }
             Some("user") => {
                 if parsed.is_sidechain {
                     continue;
                 }
-                let Some(message) = parsed.message else { continue };
+                let Some(message) = parsed.message else {
+                    continue;
+                };
                 let Some(text) = extract_prompt_text(message.content.as_ref()) else {
                     continue;
                 };
@@ -466,6 +548,7 @@ fn parse_file(path: &Path, mtime: i128) -> Result<FileEntry> {
                 current = Some(PromptStat {
                     text,
                     tokens: 0,
+                    cost_micros: 0,
                     project: parsed.cwd.unwrap_or_default(),
                     timestamp: ts,
                 });
@@ -584,6 +667,44 @@ mod tests {
         assert_eq!(agg.scanned_files, 1);
         let project_total = agg.by_project.get("/Users/a/proj").unwrap().total;
         assert_eq!(project_total, 100 + 200 + 10 + 50 + 50 + 100);
+    }
+
+    #[test]
+    fn prices_messages_by_model_and_cache_ttl() {
+        let td = TempDir::new().unwrap();
+        write_jsonl(
+            td.path(),
+            "s1.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-05-19T07:59:00Z","message":{"content":"do it"}}"#,
+                // Opus 5: 1M 1h-write ($10) + 1M read ($0.50) + 100K output ($2.50).
+                r#"{"type":"assistant","timestamp":"2026-05-19T08:00:00Z","cwd":"/p","message":{"model":"claude-opus-5","usage":{"output_tokens":100000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000,"cache_creation":{"ephemeral_1h_input_tokens":1000000,"ephemeral_5m_input_tokens":0}}}}"#,
+                // Unpriced model: tokens count, cost doesn't.
+                r#"{"type":"assistant","timestamp":"2026-05-19T09:00:00Z","cwd":"/p","message":{"model":"<synthetic>","usage":{"input_tokens":5}}}"#,
+            ],
+        );
+        let mut agg = Aggregates::default();
+        agg.refresh(td.path()).unwrap();
+        let day = agg.by_day.values().next().unwrap();
+        assert_eq!(day.cost_micros, 13_000_000);
+        assert_eq!(day.sum(), 2_100_005);
+        assert_eq!(agg.by_project["/p"].cost_micros, 13_000_000);
+        assert_eq!(agg.top_prompts(1, None)[0].cost_micros, 13_000_000);
+        let (_, usage) = &agg.top_projects(1, None)[0];
+        assert_eq!(usage.cost_micros, 13_000_000);
+    }
+
+    #[test]
+    fn cache_hit_rate_uses_input_side_only() {
+        let t = Totals {
+            input: 10,
+            cache_creation: 40,
+            cache_read: 150,
+            output: 1_000,
+            ..Default::default()
+        };
+        assert_eq!(t.cache_hit_rate(), Some(0.75));
+        assert_eq!(Totals::default().cache_hit_rate(), None);
     }
 
     #[test]
@@ -800,6 +921,7 @@ mod tests {
         ]);
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
         let (current, projected) = agg.current_month_total_and_projection(today);
+        let (current, projected) = (current.tokens, projected.tokens);
         assert_eq!(current, 200);
         assert_eq!(projected, 200 * 31 / 2);
     }
@@ -813,14 +935,17 @@ mod tests {
         ]);
         let today = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
         let (current, _) = agg.current_month_total_and_projection(today);
-        assert_eq!(current, 50);
+        assert_eq!(current.tokens, 50);
     }
 
     #[test]
     fn monthly_projection_zero_when_no_data() {
         let agg = Aggregates::default();
         let today = NaiveDate::from_ymd_opt(2026, 5, 15).unwrap();
-        assert_eq!(agg.current_month_total_and_projection(today), (0, 0));
+        assert_eq!(
+            agg.current_month_total_and_projection(today),
+            (TokenCost::default(), TokenCost::default())
+        );
     }
 
     #[test]
@@ -829,6 +954,7 @@ mod tests {
         let agg = agg_with_days(&[(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(), 100)]);
         let today = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
         let (current, projected) = agg.current_month_total_and_projection(today);
+        let (current, projected) = (current.tokens, projected.tokens);
         assert_eq!(current, 100);
         assert_eq!(projected, 100 * 31);
     }
@@ -839,6 +965,7 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 2, 14).unwrap();
         // 2026 is non-leap, so Feb has 28 days; 14 days elapsed → projection = 140 * 28 / 14 = 280.
         let (current, projected) = agg.current_month_total_and_projection(today);
+        let (current, projected) = (current.tokens, projected.tokens);
         assert_eq!(current, 140);
         assert_eq!(projected, 280);
     }

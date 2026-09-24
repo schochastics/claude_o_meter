@@ -2,7 +2,7 @@
 
 use crate::app_state::{AppState, DataState};
 use crate::bars::{CANVAS_H, CANVAS_W, Theme, render_bar_rgba, render_solid_bar_rgba};
-use crate::history::{Aggregates, PromptStat, short_name};
+use crate::history::{Aggregates, PromptStat, Totals, short_name};
 use crate::icons::Band;
 use crate::theme::Appearance;
 use crate::time_fmt::resets_in;
@@ -28,6 +28,13 @@ const COLOR_CACHE_READ: [u8; 3] = [0x3A, 0xC0, 0x6E]; // green
 const TOP_PROJECTS_N: usize = 8;
 const TOP_PROMPTS_N: usize = 3;
 const TOKEN_COL_WIDTH: usize = 6;
+const SHARE_COL_WIDTH: usize = 5;
+const COST_COL_WIDTH: usize = 6;
+/// Shown under the history legend so the dollar figures aren't mistaken for
+/// an actual bill.
+const COST_FOOTNOTE: &str = "$ = API list-price equivalent, not billed";
+/// Legend swatches never shrink below this fraction of the canvas.
+const LEGEND_MIN_FRACTION: f64 = 0.06;
 const FIG_SPACE: char = '\u{2007}';
 
 pub fn build_menu(state: &AppState) -> MenuIds {
@@ -71,6 +78,17 @@ pub fn build_menu(state: &AppState) -> MenuIds {
                 if let Some(line) = burn_rate_line(w.utilization, w.resets_at, now) {
                     let _ = menu.append(&MenuItem::new(line, false, None));
                 }
+            }
+            // Per-model weekly caps (`seven_day_opus`, `seven_day_sonnet`, …)
+            // when the account has them; null / absent windows are skipped.
+            for (model, w) in usage.per_model() {
+                let _ = menu.append(&window_row(
+                    &format!("{model} weekly"),
+                    w.utilization,
+                    w.resets_at,
+                    now,
+                    &theme,
+                ));
             }
 
             let _ = menu.append(&PredefinedMenuItem::separator());
@@ -175,18 +193,30 @@ fn history_submenu(h: &Aggregates, today: chrono::NaiveDate, theme: &Theme) -> S
     let mut days = h.last_n_days(7, today);
     days.reverse();
     let max_total: u64 = days.iter().map(|(_, t)| t.sum()).max().unwrap_or(0);
-    let week_total: u64 = days.iter().map(|(_, t)| t.sum()).sum();
+    let mut week = Totals::default();
+    for (_, t) in &days {
+        week.add(t);
+    }
 
     let sub = Submenu::new(
-        format!("History — last 7d: {}", humanize_tokens(week_total)),
+        format!(
+            "History — last 7d: {} · {}",
+            humanize_tokens(week.sum()),
+            approx_usd(week.cost_micros),
+        ),
         true,
     );
 
-    let _ = sub.append(&MenuItem::new(
-        "input · output · cache write · cache read",
-        false,
-        None,
-    ));
+    // Color key doubling as the 7-day breakdown per token type. Each swatch
+    // is sized by that type's share of the week, with a floor so the color
+    // stays recognizable even for a 0.1% category.
+    for (label, bar) in legend_rows(&week, theme) {
+        let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
+    }
+    if let Some(line) = cache_hit_line(&week) {
+        let _ = sub.append(&MenuItem::new(line, false, None));
+    }
+    let _ = sub.append(&MenuItem::new(COST_FOOTNOTE, false, None));
     let _ = sub.append(&PredefinedMenuItem::separator());
 
     let scale_basis = max_total.max(1);
@@ -203,13 +233,54 @@ fn history_submenu(h: &Aggregates, today: chrono::NaiveDate, theme: &Theme) -> S
             theme,
         );
         let label = format!(
-            "{}  {}",
+            "{}  {}  {}",
             pad_left_figure(&humanize_tokens(row_total), TOKEN_COL_WIDTH),
+            pad_left_figure(&usd(totals.cost_micros), COST_COL_WIDTH),
             date.format("%a %m-%d"),
         );
         let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
     }
     sub
+}
+
+/// Legend rows for the history submenu: `(label, swatch_rgba)` per token
+/// type, in the same order the stacked day bars use.
+fn legend_rows(week: &Totals, theme: &Theme) -> Vec<(String, Vec<u8>)> {
+    let total = week.sum();
+    [
+        ("input", week.input, COLOR_INPUT),
+        ("output", week.output, COLOR_OUTPUT),
+        ("cache write", week.cache_creation, COLOR_CACHE_CREATION),
+        ("cache read", week.cache_read, COLOR_CACHE_READ),
+    ]
+    .into_iter()
+    .map(|(name, n, color)| {
+        let share = if total == 0 {
+            0.0
+        } else {
+            n as f64 / total as f64
+        };
+        let bar = render_solid_bar_rgba(share.max(LEGEND_MIN_FRACTION), color, theme);
+        let label = format!(
+            "{}  {}  {}",
+            pad_left_figure(&humanize_tokens(n), TOKEN_COL_WIDTH),
+            pad_left_figure(&format_share(share), SHARE_COL_WIDTH),
+            name,
+        );
+        (label, bar)
+    })
+    .collect()
+}
+
+/// Percent share with one decimal below 10% so small categories don't all
+/// collapse to "0%".
+fn format_share(share: f64) -> String {
+    let pct = share * 100.0;
+    if pct > 0.0 && pct < 10.0 {
+        format!("{pct:.1}%")
+    } else {
+        format!("{}%", pct.round() as i64)
+    }
 }
 
 fn top_projects_submenu(
@@ -224,15 +295,16 @@ fn top_projects_submenu(
         let _ = sub.append(&MenuItem::new("(no data)", false, None));
         return sub;
     }
-    let max_total = top.first().map(|(_, n)| *n).unwrap_or(0).max(1);
+    let max_total = top.first().map(|(_, u)| u.tokens).unwrap_or(0).max(1);
     let all_paths: Vec<&str> = h.by_project.keys().map(|s| s.as_str()).collect();
-    for (path, total) in &top {
-        let fraction = *total as f64 / max_total as f64;
+    for (path, u) in &top {
+        let fraction = u.tokens as f64 / max_total as f64;
         let bar = render_solid_bar_rgba(fraction, COLOR_OUTPUT, theme);
         let name = short_name(path, &all_paths);
         let label = format!(
-            "{}  {}",
-            pad_left_figure(&humanize_tokens(*total), TOKEN_COL_WIDTH),
+            "{}  {}  {}",
+            pad_left_figure(&humanize_tokens(u.tokens), TOKEN_COL_WIDTH),
+            pad_left_figure(&usd(u.cost_micros), COST_COL_WIDTH),
             name,
         );
         let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
@@ -260,8 +332,9 @@ fn top_prompts_submenu(
         let fraction = p.tokens as f64 / max_total as f64;
         let bar = render_solid_bar_rgba(fraction, COLOR_OUTPUT, theme);
         let label = format!(
-            "{}  {}",
+            "{}  {}  {}",
             pad_left_figure(&humanize_tokens(p.tokens), TOKEN_COL_WIDTH),
+            pad_left_figure(&usd(p.cost_micros), COST_COL_WIDTH),
             p.text,
         );
         let _ = sub.append(&IconMenuItem::new(label, false, Some(bar_icon(bar)), None));
@@ -279,6 +352,30 @@ fn humanize_tokens(n: u64) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// Dollar amount from micro-dollars, sized for a narrow menu column:
+/// `$0.42`, `$12.30`, `$123`, `$1.2K`.
+fn usd(micros: u64) -> String {
+    let d = micros as f64 / 1e6;
+    if d >= 1000.0 {
+        format!("${:.1}K", d / 1000.0)
+    } else if d >= 100.0 {
+        format!("${d:.0}")
+    } else {
+        format!("${d:.2}")
+    }
+}
+
+/// `usd` marked as an estimate, for headline figures.
+fn approx_usd(micros: u64) -> String {
+    format!("≈{}", usd(micros))
+}
+
+/// "Cache hit rate 94%" for the 7-day window, `None` without input tokens.
+fn cache_hit_line(week: &Totals) -> Option<String> {
+    let rate = week.cache_hit_rate()?;
+    Some(format!("Cache hit rate {}", format_share(rate)))
 }
 
 /// Weekly burn-rate projection. Returns a short status string to render as a
@@ -333,13 +430,15 @@ fn humanize_hours(h: f64) -> String {
 /// `None` if there's no usage data for the current month yet.
 fn monthly_line(history: &Aggregates, today: chrono::NaiveDate) -> Option<String> {
     let (current, projected) = history.current_month_total_and_projection(today);
-    if current == 0 {
+    if current.tokens == 0 {
         return None;
     }
     Some(format!(
-        "Month: {} (proj {})",
-        humanize_tokens(current),
-        humanize_tokens(projected),
+        "Month: {} · {} (proj {} · {})",
+        humanize_tokens(current.tokens),
+        approx_usd(current.cost_micros),
+        humanize_tokens(projected.tokens),
+        approx_usd(projected.cost_micros),
     ))
 }
 
@@ -479,6 +578,66 @@ mod tests {
     #[test]
     fn pad_left_figure_leaves_overlong_alone() {
         assert_eq!(pad_left_figure("123456", 4), "123456");
+    }
+
+    #[test]
+    fn legend_rows_label_every_category_with_share() {
+        let theme = Theme {
+            empty_bg: [0, 0, 0, 0xFF],
+        };
+        let week = Totals {
+            input: 2_000,
+            output: 18_000,
+            cache_creation: 80_000,
+            cache_read: 900_000,
+            ..Default::default()
+        };
+        let rows = legend_rows(&week, &theme);
+        let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels.len(), 4);
+        assert!(labels[0].ends_with("0.2%  input"), "got: {}", labels[0]);
+        assert!(labels[1].ends_with("1.8%  output"), "got: {}", labels[1]);
+        assert!(
+            labels[2].ends_with("8.0%  cache write"),
+            "got: {}",
+            labels[2]
+        );
+        assert!(labels[3].ends_with("90%  cache read"), "got: {}", labels[3]);
+        // Tiny share still paints its color at the left edge.
+        assert_eq!(rows[0].1[..3], COLOR_INPUT);
+    }
+
+    #[test]
+    fn legend_rows_handle_empty_week() {
+        let theme = Theme {
+            empty_bg: [0, 0, 0, 0xFF],
+        };
+        let rows = legend_rows(&Totals::default(), &theme);
+        assert!(rows[0].0.ends_with("0%  input"), "got: {}", rows[0].0);
+        // Swatch still shows the color so the key is readable with no data.
+        assert_eq!(rows[3].1[..3], COLOR_CACHE_READ);
+    }
+
+    #[test]
+    fn usd_formats_by_magnitude() {
+        assert_eq!(usd(0), "$0.00");
+        assert_eq!(usd(420_000), "$0.42");
+        assert_eq!(usd(12_300_000), "$12.30");
+        assert_eq!(usd(123_400_000), "$123");
+        assert_eq!(usd(1_250_000_000), "$1.2K");
+        assert_eq!(approx_usd(420_000), "≈$0.42");
+    }
+
+    #[test]
+    fn cache_hit_line_formats_rate() {
+        let t = Totals {
+            input: 5,
+            cache_creation: 5,
+            cache_read: 90,
+            ..Default::default()
+        };
+        assert_eq!(cache_hit_line(&t).as_deref(), Some("Cache hit rate 90%"));
+        assert_eq!(cache_hit_line(&Totals::default()), None);
     }
 
     #[test]

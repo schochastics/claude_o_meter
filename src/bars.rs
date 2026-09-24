@@ -9,6 +9,9 @@
 pub const CANVAS_W: u32 = 200;
 pub const CANVAS_H: u32 = 36;
 
+/// Minimum width (canvas px, i.e. 2 pt) of a non-zero stacked segment.
+const MIN_SEGMENT_PX: u32 = 4;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     /// Background of the "empty" portion of the bar.
@@ -20,6 +23,10 @@ pub struct Theme {
 /// `segments` are `(count, rgb)` pairs laid out left-to-right. The filled
 /// width is `(sum(counts) / scale_basis) × CANVAS_W`, clamped to the
 /// canvas. The remainder of the row is `theme.empty_bg`.
+///
+/// Every non-zero segment gets at least `MIN_SEGMENT_PX` so small categories
+/// (input / output next to a huge cache-read share) stay visible instead of
+/// rounding down to nothing.
 pub fn render_bar_rgba(segments: &[(u64, [u8; 3])], scale_basis: u64, theme: &Theme) -> Vec<u8> {
     let mut buf = fill(theme.empty_bg);
     let total: u64 = segments.iter().map(|(n, _)| *n).sum();
@@ -32,7 +39,8 @@ pub fn render_bar_rgba(segments: &[(u64, [u8; 3])], scale_basis: u64, theme: &Th
         if *n == 0 {
             continue;
         }
-        let segment_px = ((*n as f64 / basis as f64) * CANVAS_W as f64).round() as u32;
+        let segment_px =
+            (((*n as f64 / basis as f64) * CANVAS_W as f64).round() as u32).max(MIN_SEGMENT_PX);
         let end = (x + segment_px).min(CANVAS_W);
         paint_band(&mut buf, x, end, *rgb);
         x = end;
@@ -141,6 +149,19 @@ mod tests {
         assert_eq!(pixel(&buf, (CANVAS_W * 3) / 8, 0)[..3], [0, 255, 0]);
         assert_eq!(pixel(&buf, (CANVAS_W * 5) / 8, 0)[..3], [0, 0, 255]);
         assert_eq!(pixel(&buf, (CANVAS_W * 7) / 8, 0), light_theme().empty_bg);
+    }
+
+    #[test]
+    fn tiny_segment_stays_visible() {
+        // 1 in 1M would round to 0 px; it must still paint MIN_SEGMENT_PX.
+        let buf = render_bar_rgba(
+            &[(1, [255, 0, 0]), (999_999, [0, 255, 0])],
+            1_000_000,
+            &light_theme(),
+        );
+        assert_eq!(pixel(&buf, 0, 0)[..3], [255, 0, 0]);
+        assert_eq!(pixel(&buf, MIN_SEGMENT_PX - 1, 0)[..3], [255, 0, 0]);
+        assert_eq!(pixel(&buf, MIN_SEGMENT_PX, 0)[..3], [0, 255, 0]);
     }
 
     #[test]
