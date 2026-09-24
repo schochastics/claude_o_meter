@@ -31,7 +31,7 @@ Click the icon for the full breakdown: session and weekly progress bars and a hi
 ### From source
 
 ```sh
-cargo install cargo-bundle --locked
+cargo install cargo-bundle --version 0.11.0 --locked
 ./scripts/build_app.sh --open
 ```
 

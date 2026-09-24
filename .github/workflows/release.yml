@@ -35,7 +35,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-bundle
-        run: cargo install cargo-bundle --locked
+        # 0.12 dropped `osx_info_plist_exts`, which Cargo.toml relies on.
+        run: cargo install cargo-bundle --version 0.11.0 --locked
 
       - name: Build arm64
         run: cargo build --release --target=aarch64-apple-darwin
