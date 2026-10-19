@@ -88,6 +88,5 @@ jobs:
                ```sh
                xattr -d com.apple.quarantine /Applications/Claude-O-Meter.app
                ```
-            4. Approve the Keychain prompt (*Always Allow*) so the app can read your Claude Code OAuth token.
 
             See the [README](https://github.com/${{ github.repository }}#first-run) for full setup notes.

@@ -45,9 +45,7 @@ Running via `cargo run` works for development, but **notifications will silently
    ```sh
    security find-generic-password -s "Claude Code-credentials"
    ```
-2. Launch the app. macOS will prompt:
-   *"Claude-O-Meter wants to access your confidential information stored in 'Claude Code-credentials' in your keychain."*
-   Click **Always Allow** so the app can poll unattended.
+2. Launch the app. It reads the token via `/usr/bin/security` — the same way Claude Code does — so there is no Keychain prompt, even after Claude Code refreshes its token.
 3. The icon turns from a neutral state (`…` tooltip) to a colored Claude sparkle reflecting your current usage.
 
 ## How utilization maps to color
@@ -141,7 +139,6 @@ assets/
 
 - [`tray-icon`](https://docs.rs/tray-icon) + [`tao`](https://docs.rs/tao) — NSStatusItem and event loop
 - [`reqwest`](https://docs.rs/reqwest) (rustls) + [`tokio`](https://docs.rs/tokio) — polling
-- [`security-framework`](https://docs.rs/security-framework) — Keychain access
 - [`mac-notification-sys`](https://docs.rs/mac-notification-sys) — native NSUserNotifications
 - [`smappservice-rs`](https://docs.rs/smappservice-rs) — SMAppService launch-at-login
 - [`objc2-app-kit`](https://docs.rs/objc2-app-kit) — NSAppearance / NSApp access for dark-mode detection

@@ -14,11 +14,16 @@
 //! }
 //! ```
 //!
-//! First read of this entry from a new binary triggers a Keychain ACL
-//! prompt. The user must click "Always Allow" for unattended operation.
+//! The entry is read through `/usr/bin/security` rather than the Security
+//! framework. Claude Code rewrites the entry whenever it refreshes its token,
+//! which resets the item's partition list to `apple-tool:`; a direct read from
+//! our (ad-hoc signed) binary would then prompt for the keychain password
+//! again. `/usr/bin/security` is in that partition and on the item's ACL —
+//! Claude Code reads the entry the same way — so no prompt appears.
+
+use std::process::Command;
 
 use chrono::{DateTime, TimeZone, Utc};
-use security_framework::passwords::get_generic_password;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -71,17 +76,25 @@ pub fn read_credentials() -> Result<StoredCreds, CredError> {
 }
 
 fn read_for_account(account: &str) -> Result<StoredCreds, CredError> {
-    let bytes = get_generic_password(SERVICE, account).map_err(|e| {
-        // security-framework wraps OSStatus codes; -25300 = errSecItemNotFound,
-        // -128 = errUserCanceled, -25293 = errSecAuthFailed.
-        let code = e.code();
-        match code {
-            -25300 => CredError::NotFound,
-            -128 | -25293 => CredError::AccessDenied,
-            _ => CredError::Other(format!("{e} (code={code})")),
-        }
-    })?;
-    parse_blob(&bytes)
+    let out = Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", SERVICE, "-a", account, "-w"])
+        .output()
+        .map_err(|e| CredError::Other(format!("failed to run security: {e}")))?;
+    if !out.status.success() {
+        // `security` exits with the low byte of the OSStatus: 44 =
+        // errSecItemNotFound (-25300), 128 = errUserCanceled (-128),
+        // 51 = errSecAuthFailed (-25293).
+        let code = out.status.code();
+        return Err(match code {
+            Some(44) => CredError::NotFound,
+            Some(128) | Some(51) => CredError::AccessDenied,
+            _ => CredError::Other(format!(
+                "{} (exit={code:?})",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+        });
+    }
+    parse_blob(out.stdout.trim_ascii())
 }
 
 fn parse_blob(bytes: &[u8]) -> Result<StoredCreds, CredError> {

@@ -12,7 +12,6 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAppearance", "NSApplication"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-security-framework = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smappservice-rs = "0.1"
