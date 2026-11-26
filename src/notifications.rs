@@ -8,6 +8,20 @@ use chrono::{DateTime, Utc};
 
 const DEFAULT_THRESHOLDS: &[f64] = &[0.75, 0.90, 0.95];
 
+/// The API's `resets_at` carries sub-second jitter between polls (the same
+/// window reports e.g. `17:00:00.58` then `17:00:00.61`). Only a shift larger
+/// than this counts as a new window; real resets move it by hours.
+const RESET_TOLERANCE_SECS: i64 = 60;
+
+/// Whether `next` denotes a different rolling window than `prev`.
+fn is_new_window(prev: Option<DateTime<Utc>>, next: Option<DateTime<Utc>>) -> bool {
+    match (prev, next) {
+        (Some(a), Some(b)) => (b - a).num_seconds().abs() > RESET_TOLERANCE_SECS,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notification {
     pub title: String,
@@ -86,12 +100,12 @@ fn crossings(
     label: &str,
     out: &mut Vec<Notification>,
 ) {
-    if state.reset_at != reset_at {
-        state.reset_at = reset_at;
+    if is_new_window(state.reset_at, reset_at) {
         for slot in state.fired.iter_mut() {
             *slot = false;
         }
     }
+    state.reset_at = reset_at;
     for (i, &t) in thresholds.iter().enumerate() {
         if utilization >= t && !state.fired[i] {
             state.fired[i] = true;
@@ -231,7 +245,7 @@ fn check_spike(
     };
 
     // Window reset: never alert across the boundary; re-arm with a fresh baseline.
-    if prev.reset_at != reset_at {
+    if is_new_window(prev.reset_at, reset_at) {
         state.last_rate = 0.0;
         state.armed = true;
         state.prev = Some(sample);
@@ -341,6 +355,16 @@ mod tests {
             3,
             "all three thresholds should re-arm at new window"
         );
+    }
+
+    #[test]
+    fn resets_at_jitter_does_not_rearm() {
+        let mut t = ThresholdTracker::default();
+        let r = Utc.with_ymd_and_hms(2026, 5, 19, 17, 0, 0).unwrap();
+        let jittered = r + chrono::Duration::milliseconds(437);
+        assert_eq!(t.observe(&resp(Some(0.80), None, r)).len(), 1);
+        assert_eq!(t.observe(&resp(Some(0.80), None, jittered)).len(), 0);
+        assert_eq!(t.observe(&resp(Some(0.80), None, r)).len(), 0);
     }
 
     #[test]
@@ -481,6 +505,15 @@ mod tests {
         assert!(!s.session_spiking());
         // Fresh baseline in the new window — a spike there fires.
         assert_eq!(s.observe(&sresp(0.25, r2), ts(21)).len(), 1);
+    }
+
+    #[test]
+    fn spike_resets_at_jitter_keeps_baseline() {
+        let mut s = SpikeTracker::new(SPIKE_T, false);
+        let r = ts(300);
+        let _ = s.observe(&sresp(0.10, r), ts(0));
+        let jittered = r + chrono::Duration::milliseconds(250);
+        assert_eq!(s.observe(&sresp(0.30, jittered), ts(7)).len(), 1);
     }
 
     #[test]
